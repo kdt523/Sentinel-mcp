@@ -5,7 +5,7 @@
 
 schema_version: 1
 name: default
-revision: "2026-11-03.1"
+revision: "2026-11-04.1"
 
 # Per-tool fail mode when deciding errors/times out (first matching glob wins).
 # Unlisted tools use SENTINEL_DEFAULT_FAIL_MODE.
@@ -126,3 +126,49 @@ rules:
     outcome: { action: BLOCK }
     risk: 0.7
     reason: "Fetching {target} is outside the allowed hosts."
+
+  # --- tool OUTPUTS and tool DESCRIPTIONS (direction: output) ------------------------------
+  # Rug-pull: a tool's description changed within the session. Per-tool override example
+  # (place ABOVE this rule; first match wins):
+  #   - id: trusted-docs-description-changed
+  #     type: description_changed
+  #     match: { tools: ["internal_docs.*"] }
+  #     outcome: { action: BLOCK }
+  #     risk: 0.5
+  #     reason: "Description of {tool} changed; call blocked but tool kept."
+  - id: tool-description-changed
+    type: description_changed
+    outcome: { action: REVOKE_TOOL }
+    risk: 0.9
+    attack_family: tool_poisoning
+    reason: "Description of {tool} changed during the session; tool revoked."
+
+  # High-confidence injection (hidden/zero-width text, instructions addressed to the model,
+  # encoded instructions): strip it automatically.
+  - id: description-injection-high
+    type: output_injection
+    confidence: high
+    kinds: [tool_description]
+    outcome: { action: SANITIZE }
+    risk: 0.8
+    attack_family: tool_poisoning
+    reason: "Tool description of {tool} contains hidden instructions ({match})."
+
+  - id: output-injection-high
+    type: output_injection
+    confidence: high
+    kinds: [tool_call]
+    outcome: { action: SANITIZE }
+    risk: 0.8
+    attack_family: indirect_injection
+    reason: "Output of {tool} contains injected instructions ({match})."
+
+  # Weaker signals (HTML/Markdown comments, role-play blocks, pseudo-tags) also occur in
+  # legitimate content: escalate for judgement. Until the guard exists the fallback strips
+  # the suspicious spans (never passes them through unchanged).
+  - id: output-injection-weak
+    type: output_injection
+    confidence: weak
+    outcome: { escalate: true, fallback: SANITIZE }
+    risk: 0.5
+    reason: "{tool} returned suspicious structure ({match}); needs review."

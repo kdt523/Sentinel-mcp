@@ -55,6 +55,23 @@ _INSTRUCTION_WORDS = re.compile(
 )
 
 
+# Detector confidence. HIGH = the text is concealed from humans or explicitly instructs the
+# model -> safe to SANITIZE automatically. WEAK = suspicious structure that also occurs in
+# legitimate content -> escalate for judgement instead of rewriting automatically.
+HIGH = "high"
+WEAK = "weak"
+CONFIDENCE: dict[str, str] = {
+    "zero_width_chars": HIGH,
+    "hidden_element": HIGH,
+    "addressed_instruction": HIGH,
+    "encoded_instruction": HIGH,
+    "html_comment": WEAK,
+    "markdown_comment": WEAK,
+    "fake_role_block": WEAK,
+    "pseudo_tag_block": WEAK,
+}
+
+
 @dataclass
 class SanitizeResult:
     text: str
@@ -103,3 +120,23 @@ def sanitize(text: str) -> SanitizeResult:
     text = _B64_BLOB.sub(blob_repl, text)
     text = _sub(_ADDRESSED, "addressed_instruction", text, removed)
     return SanitizeResult(text=text, removed=removed)
+
+
+def detect(text: str) -> dict[str, str]:
+    """Detector labels found in ``text`` mapped to their confidence (no rewriting).
+
+    Every detector runs independently on the ORIGINAL text, so an instruction addressed to
+    the model inside an HTML comment is reported as ``addressed_instruction`` (high), not
+    only as ``html_comment`` (weak).
+    """
+    checks: dict[str, bool] = {
+        "zero_width_chars": bool(_ZERO_WIDTH.search(text)),
+        "html_comment": bool(_HTML_COMMENT.search(text)),
+        "hidden_element": bool(_HIDDEN_ELEMENT.search(text) or _HIDDEN_ATTR_ELEMENT.search(text)),
+        "fake_role_block": bool(_FAKE_ROLE_BLOCK.search(text) or _FAKE_ROLE_LINE.search(text)),
+        "pseudo_tag_block": bool(_PSEUDO_TAG_BLOCK.search(text)),
+        "markdown_comment": bool(_MD_COMMENT.search(text)),
+        "encoded_instruction": any(_encoded_instruction(b) for b in _B64_BLOB.findall(text)),
+        "addressed_instruction": bool(_ADDRESSED.search(_ZERO_WIDTH.sub("", text))),
+    }
+    return {label: CONFIDENCE[label] for label, hit in checks.items() if hit}

@@ -199,3 +199,50 @@ def test_cached_decision_keeps_original_tier() -> None:
 def test_invalid_decisions(kw: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         _decision(**kw)
+
+
+# --- description change fields ------------------------------------------------------------
+
+PREV = sha256_text("old description")
+
+
+def _desc(**kw: object) -> Event:
+    return Event.from_output(
+        session_id="s1", server="weather", tool="get_forecast", full_text="new description",
+        max_chars=1000, kind=EventKind.TOOL_DESCRIPTION, **kw,  # type: ignore[arg-type]
+    )  # fmt: skip
+
+
+def test_description_change_on_tool_description() -> None:
+    e = _desc(description_changed=True, previous_description_sha256=PREV)
+    assert e.description_changed and e.previous_description_sha256 == PREV
+    assert Event.model_validate_json(e.model_dump_json()) == e
+    assert not _desc().description_changed
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"description_changed": True, "previous_description_sha256": PREV},
+        {"description_changed": True},
+        {"previous_description_sha256": PREV},
+    ],
+)
+def test_description_fields_rejected_on_tool_calls(kw: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="only allowed when kind=tool_description"):
+        _out("x", **kw)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="only allowed when kind=tool_description"):
+        _req(**kw)
+
+
+@pytest.mark.parametrize(
+    "kw", [{"description_changed": True}, {"previous_description_sha256": PREV}]
+)
+def test_description_change_needs_both_fields(kw: dict[str, object]) -> None:
+    with pytest.raises(ValidationError, match="requires previous_description_sha256"):
+        _desc(**kw)
+
+
+def test_previous_hash_must_be_sha256() -> None:
+    with pytest.raises(ValidationError):
+        _desc(description_changed=True, previous_description_sha256="nothex")

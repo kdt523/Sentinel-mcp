@@ -48,7 +48,8 @@ from gateway.detectors import (
     paths_in_args,
     redact_secrets,
 )
-from gateway.models import Action, Decision, Direction, Event, Tier
+from gateway.models import Action, Decision, Direction, Event, EventKind, Tier, sha256_text
+from gateway.sanitizer import detect
 from gateway.session import SessionState, SessionTracker
 
 PLACEHOLDERS = frozenset({"tool", "path", "target", "classes", "count", "limit", "risk", "match"})
@@ -252,6 +253,54 @@ class SessionRiskRule(_RuleBase):
         return None
 
 
+class _OutputRule(_RuleBase):
+    """Base for rules that inspect tool OUTPUTS (results and tool descriptions)."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_output_direction(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            match = dict(data.get("match") or {})
+            match.setdefault("direction", Direction.OUTPUT.value)
+            data = {**data, "match": match}
+        return data
+
+    @model_validator(mode="after")
+    def _output_only(self) -> Self:
+        if self.match.direction is not Direction.OUTPUT:
+            raise ValueError(f"{self.__class__.__name__} rules only apply to direction=output")
+        return self
+
+
+class OutputInjectionRule(_OutputRule):
+    """Fires when sanitizer detectors of the given confidence find injected instructions."""
+
+    type: Literal["output_injection"]
+    confidence: Literal["high", "weak"]
+    kinds: list[EventKind] = Field(
+        default_factory=lambda: [EventKind.TOOL_CALL, EventKind.TOOL_DESCRIPTION], min_length=1
+    )
+
+    def check(self, ctx: PolicyContext) -> dict[str, str] | None:
+        ev = ctx.event
+        if ev.kind not in self.kinds or ev.output is None:
+            return None
+        labels = sorted(lbl for lbl, conf in detect(ev.output).items() if conf == self.confidence)
+        return {"match": ", ".join(labels)} if labels else None
+
+
+class DescriptionChangedRule(_OutputRule):
+    """Fires when a tool's description changed within the session (rug-pull)."""
+
+    type: Literal["description_changed"]
+
+    def check(self, ctx: PolicyContext) -> dict[str, str] | None:
+        ev = ctx.event
+        if ev.kind is EventKind.TOOL_DESCRIPTION and ev.description_changed:
+            return {}
+        return None
+
+
 Rule = Annotated[
     ToolMatchRule
     | DenyPathsRule
@@ -259,7 +308,9 @@ Rule = Annotated[
     | EgressAllowlistRule
     | TaintedFlowRule
     | MaxCallsRule
-    | SessionRiskRule,
+    | SessionRiskRule
+    | OutputInjectionRule
+    | DescriptionChangedRule,
     Field(discriminator="type"),
 ]
 
@@ -373,43 +424,43 @@ async def build_context(tracker: SessionTracker, event: Event) -> PolicyContext:
 DEFAULT_POLICY = Path("policies/default.yaml")
 
 
-def _scenario_events(path: Path, session_id: str, max_chars: int) -> list[Event]:
-    events = []
+def _scenario_specs(path: Path) -> list[tuple[int, dict[str, Any]]]:
+    specs = []
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         spec = json.loads(line)
-        server, _, tool = spec["tool"].partition(".")
-        if not tool:
+        if "." not in spec.get("tool", ""):
             raise PolicyError(f"{path}:{n}: tool must be '<server>.<tool>'")
-        if spec["direction"] == "request":
-            events.append(
-                Event(
-                    session_id=session_id,
-                    direction=Direction.REQUEST,
-                    server=server,
-                    tool=tool,
-                    args=spec.get("args", {}),
-                )  # fmt: skip
-            )
-        else:
-            text = spec.get("output")
-            if text is None:
-                text = Path(spec["output_file"]).read_text(encoding="utf-8")
-            events.append(
-                Event.from_output(
-                    session_id=session_id,
-                    server=server,
-                    tool=tool,
-                    full_text=text,
-                    max_chars=max_chars,
-                )  # fmt: skip
-            )
-    return events
+        specs.append((n, spec))
+    return specs
+
+
+async def _scenario_event(
+    spec: dict[str, Any], session_id: str, tracker: SessionTracker, max_chars: int
+) -> Event:
+    """Build an event from a scenario line. ``kind: tool_description`` lines get their
+    description hash checked against the session exactly as the proxy does (rug-pulls)."""
+    server, _, tool = spec["tool"].partition(".")
+    if spec["direction"] == "request":
+        return Event(session_id=session_id, direction=Direction.REQUEST, server=server,
+                     tool=tool, args=spec.get("args", {}))  # fmt: skip
+    text = spec.get("output")
+    if text is None:
+        text = Path(spec["output_file"]).read_text(encoding="utf-8")
+    kind = EventKind(spec.get("kind", EventKind.TOOL_CALL.value))
+    changed, previous = False, None
+    if kind is EventKind.TOOL_DESCRIPTION:
+        obs = await tracker.observe_description(session_id, spec["tool"], sha256_text(text))
+        changed, previous = obs.changed, obs.previous_sha256 if obs.changed else None
+    return Event.from_output(session_id=session_id, server=server, tool=tool, full_text=text,
+                             max_chars=max_chars, kind=kind, description_changed=changed,
+                             previous_description_sha256=previous)  # fmt: skip
 
 
 async def dry_run(engine: PolicyEngine, scenario: Path) -> list[dict[str, Any]]:
-    """Replay a scenario through the policy with an in-memory session (no Redis needed)."""
+    """Replay a scenario through the REAL decision pipeline (built-in session checks +
+    policy) and enforcement side effects, with an in-memory session (no Redis needed)."""
     try:
         import fakeredis
     except ImportError as exc:  # optional extra
@@ -417,25 +468,18 @@ async def dry_run(engine: PolicyEngine, scenario: Path) -> list[dict[str, Any]]:
             "policy dry-run needs the 'tools' extra (in-memory Redis): "
             "uv sync --extra tools   (or: pip install 'sentinel-mcp[tools]')"
         ) from exc
+    from gateway.decider import PipelineDecider  # local: decider imports this module
 
     redis = fakeredis.FakeAsyncRedis()
     tracker = SessionTracker(redis)
+    decider = PipelineDecider(tracker, engine)
     sid = f"dry-run:{scenario.stem}"
     rows: list[dict[str, Any]] = []
     last_request: dict[str, Event] = {}
     try:
-        for i, event in enumerate(_scenario_events(scenario, sid, 16_000), 1):
-            if await tracker.is_terminated(sid):
-                rows.append({"step": i, "direction": event.direction.value,
-                             "tool": event.qualified_tool, "action": "TERMINATED",
-                             "rule": None, "escalate": False, "risk": None,
-                             "reason": "session already terminated"})  # fmt: skip
-                continue
-            match = engine.evaluate(await build_context(tracker, event))
-            decision = match.decision if match else Decision(
-                action=Action.ALLOW, risk=0.0, reason="no policy opinion", tier=Tier.DEFAULT,
-                model_version=engine.model_version,
-            )  # fmt: skip
+        for i, (_, spec) in enumerate(_scenario_specs(scenario), 1):
+            event = await _scenario_event(spec, sid, tracker, 16_000)
+            decision = await decider.decide(event)
             await tracker.record(event, decision, request=last_request.get(event.qualified_tool))
             if event.direction is Direction.REQUEST:
                 last_request[event.qualified_tool] = event
@@ -443,12 +487,15 @@ async def dry_run(engine: PolicyEngine, scenario: Path) -> list[dict[str, Any]]:
                 await tracker.terminate(sid, decision.reason)
             elif decision.action is Action.REVOKE_TOOL:
                 await tracker.revoke_tool(sid, event.qualified_tool)
+            opinion = decision.tier is not Tier.DEFAULT
             rows.append({
-                "step": i, "direction": event.direction.value, "tool": event.qualified_tool,
-                "action": decision.action.value if match else "-",
-                "rule": match.rule_id if match else None,
-                "escalate": bool(match and match.escalate),
-                "risk": decision.risk, "reason": decision.reason if match else "",
+                "step": i, "direction": event.direction.value, "kind": event.kind.value,
+                "tool": event.qualified_tool,
+                "action": decision.action.value if opinion else "-",
+                "rule": decision.rule_id,
+                "tier": decision.tier.value,
+                "escalate": decision.tier is Tier.FALLBACK,
+                "risk": decision.risk, "reason": decision.reason if opinion else "",
             })  # fmt: skip
     finally:
         await redis.aclose()
@@ -486,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             tag = " (escalate)" if r["escalate"] else ""
             print(f"{r['step']:>3} {r['direction']:<7} {r['tool']:<26} {r['action']:<18}"
-                  f"{(r['rule'] or ''):<24}{r['reason']}{tag}")  # fmt: skip
+                  f"{(r['rule'] or ''):<30} {r['reason']}{tag}")  # fmt: skip
     return 0
 
 

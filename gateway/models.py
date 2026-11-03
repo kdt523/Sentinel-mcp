@@ -88,6 +88,9 @@ class Event(_Frozen):
     output_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     output_chars: int | None = Field(default=None, ge=0)
     upstream_ms: float | None = Field(default=None, ge=0)
+    # tool_description events only: did this tool's description change within the session?
+    description_changed: bool = False
+    previous_description_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @classmethod
     def from_output(
@@ -100,6 +103,8 @@ class Event(_Frozen):
         max_chars: int,
         kind: EventKind = EventKind.TOOL_CALL,
         upstream_ms: float | None = None,
+        description_changed: bool = False,
+        previous_description_sha256: str | None = None,
     ) -> Event:
         if max_chars <= 0:
             raise ValueError("max_chars must be positive")
@@ -113,6 +118,8 @@ class Event(_Frozen):
             output_sha256=sha256_text(full_text),
             output_chars=len(full_text),
             upstream_ms=upstream_ms,
+            description_changed=description_changed,
+            previous_description_sha256=previous_description_sha256,
         )
 
     @property
@@ -132,6 +139,17 @@ class Event(_Frozen):
     def _validate_shape(self) -> Self:
         if self.ts.tzinfo is None:
             raise ValueError("ts must be timezone-aware")
+        if self.kind is not EventKind.TOOL_DESCRIPTION and (
+            self.description_changed or self.previous_description_sha256 is not None
+        ):
+            raise ValueError(
+                "description_changed / previous_description_sha256 are only allowed when "
+                "kind=tool_description"
+            )
+        if self.description_changed != (self.previous_description_sha256 is not None):
+            raise ValueError(
+                "description_changed=true requires previous_description_sha256 (and vice versa)"
+            )
         if self.direction is Direction.REQUEST:
             if self.kind is EventKind.TOOL_DESCRIPTION:
                 raise ValueError("tool_description events are always direction=output")
