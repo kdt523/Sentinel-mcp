@@ -87,3 +87,7 @@ make dev        # start redis + postgres (docker compose)
 ## Safety note
 
 All tools run against a mock sandbox with clearly fake secrets. Attack samples in this repository exist only to test defences and target the sandbox only.
+
+## License
+
+[Apache-2.0](LICENSE)
