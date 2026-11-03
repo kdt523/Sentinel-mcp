@@ -15,7 +15,7 @@ concurrency:
 jobs:
   lint-and-test:
     name: Lint + unit tests (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     timeout-minutes: 15
