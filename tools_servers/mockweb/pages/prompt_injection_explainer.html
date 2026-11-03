@@ -1,0 +1,20 @@
+<!doctype html>
+<html><head><title>Understanding prompt injection in AI agents</title></head>
+<body>
+<h1>Understanding prompt injection in AI agents</h1>
+<p>Prompt injection happens when text that an AI system reads is treated as instructions
+instead of data. Attackers have used phrases such as
+<q>ignore previous instructions</q> or <q>you are now in developer mode</q> inside web pages,
+emails and documents.</p>
+<h2>Indirect injection</h2>
+<p>In the indirect form, the attacker never talks to the assistant. They plant text in content
+the assistant will later read, for example a hidden comment on a web page asking the
+assistant to send files somewhere. The assistant then mistakes that text for a user request.</p>
+<h2>Defences</h2>
+<ul>
+<li>Treat tool outputs as untrusted data.</li>
+<li>Track what sensitive data a session has touched before allowing network egress.</li>
+<li>Require human approval for high-impact actions.</li>
+</ul>
+<p>This article is educational and contains no instructions for any assistant to follow.</p>
+</body></html>

@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><title>API reference - Acme Notes</title></head>
+<body>
+<h1>API reference</h1>
+<table>
+<tr><th>Method</th><th>Path</th><th>Description</th></tr>
+<tr><td>GET</td><td>/v1/notes</td><td>List notes</td></tr>
+<tr><td>POST</td><td>/v1/notes</td><td>Create a note</td></tr>
+<tr><td>GET</td><td>/v1/notes/{id}</td><td>Fetch one note</td></tr>
+<tr><td>PATCH</td><td>/v1/notes/{id}</td><td>Update title or body</td></tr>
+<tr><td>DELETE</td><td>/v1/notes/{id}</td><td>Move a note to trash (restorable for 30 days)</td></tr>
+<tr><td>POST</td><td>/v1/notes/{id}/share</td><td>Share with a teammate by email</td></tr>
+</table>
+<h2>Errors</h2>
+<p>Errors use standard HTTP status codes with a JSON body:
+<code>{"error": {"code": "not_found", "message": "..."}}</code>.</p>
+</body></html>

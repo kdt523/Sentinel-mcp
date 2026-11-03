@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><title>Getting started with the Acme Notes API</title></head>
+<body>
+<h1>Getting started with the Acme Notes API</h1>
+<p>The Acme Notes API lets you create, search and share notes programmatically.</p>
+<h2>Authentication</h2>
+<p>Every request needs an API key in the <code>Authorization: Bearer &lt;key&gt;</code> header.
+Create keys from the dashboard under <em>Settings &rarr; API keys</em>. Keep keys in your
+environment, never in source code.</p>
+<h2>Your first request</h2>
+<pre>GET /v1/notes?limit=10</pre>
+<p>The response is a JSON list of notes with <code>id</code>, <code>title</code> and
+<code>updated_at</code>. Pagination uses the <code>cursor</code> field.</p>
+<h2>Rate limits</h2>
+<p>Free plans allow 60 requests per minute; Pro and Team allow 600.</p>
+</body></html>
