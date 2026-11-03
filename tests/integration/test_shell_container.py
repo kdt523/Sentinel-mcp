@@ -61,7 +61,7 @@ def params(image_built: None, tmp_path: Path) -> StdioServerParameters:
     sandbox = prepare_sandbox(tmp_path / "fs")
     return StdioServerParameters(
         command=DOCKER,
-        args=["compose", "run", "--rm", "-T", "shell"],
+        args=["compose", "run", "--rm", "-T", "-e", "SHELL_TRANSPORT=stdio", "shell"],
         cwd=str(REPO),
         env={**os.environ, "SHELL_SANDBOX_DIR": str(sandbox)},
     )

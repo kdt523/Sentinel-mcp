@@ -15,7 +15,9 @@ COPY tools_servers/shell tools_servers/shell
 FROM python:3.12-slim
 RUN groupadd --system --gid 10001 sandbox \
  && useradd --system --uid 10001 --gid sandbox --home-dir /sandbox --shell /usr/sbin/nologin sandbox \
- && mkdir -p /sandbox && chown sandbox:sandbox /sandbox
+ && mkdir -p /sandbox && chown sandbox:sandbox /sandbox \
+ && mkdir -p /run/sentinel-shell && chown sandbox:sandbox /run/sentinel-shell \
+ && chmod 0700 /run/sentinel-shell
 COPY --from=build /app /app
 ENV PATH="/app/.venv/bin:/usr/local/bin:/usr/bin:/bin" \
     PYTHONPATH=/app \

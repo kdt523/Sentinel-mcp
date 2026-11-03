@@ -21,15 +21,22 @@ from __future__ import annotations
 import os
 import shlex
 import signal
+import socket
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 
 DEFAULT_ALLOWLIST = ("ls", "cat", "grep", "wc", "head", "echo", "date", "python3")
 DEFAULT_ROOT = Path("/sandbox")
+DEFAULT_SOCKET = Path("/run/sentinel-shell/shell.sock")
+# Exact Host header accepted over the socket. DNS-rebinding protection stays ON; the SDK's
+# defaults ("localhost:*") need a port, which requests over a Unix socket do not carry.
+UDS_HOST = "shell.uds"
 TIMEOUT_S = 5.0
 MAX_CMD_CHARS = 4_000
 MAX_ARGS = 64
@@ -150,7 +157,52 @@ def main() -> None:
         raise SystemExit("refusing to start: shell server only runs inside its sandbox container")
     root = Path(os.environ.get("SANDBOX_FS_ROOT", str(DEFAULT_ROOT)))
     allowlist = parse_allowlist(os.environ.get("SANDBOX_SHELL_ALLOWLIST"))
-    build_server(root, allowlist).run("stdio")
+    server = build_server(root, allowlist)
+    transport = os.environ.get("SHELL_TRANSPORT", "stdio")
+    if transport == "stdio":
+        server.run("stdio")
+    elif transport == "uds":
+        serve_uds(server, Path(os.environ.get("SHELL_SOCKET_PATH", str(DEFAULT_SOCKET))))
+    else:
+        raise SystemExit(f"SHELL_TRANSPORT must be stdio or uds, got {transport!r}")
+
+
+def bind_private_socket(path: Path) -> socket.socket:
+    """Bind a Unix socket that is mode 0600 from the moment it exists (no chmod race)."""
+    if path.exists() or path.is_symlink():
+        if not stat.S_ISSOCK(path.lstat().st_mode):
+            raise SystemExit(f"refusing to replace non-socket file at {path}")
+        path.unlink()  # stale socket from a previous run
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined,unused-ignore]
+    old_umask = os.umask(0o177)
+    try:
+        sock.bind(str(path))
+    finally:
+        os.umask(old_umask)
+    os.chmod(path, 0o600)  # belt and braces
+    sock.listen(64)
+    return sock
+
+
+def serve_uds(server: MCPServer, path: Path) -> None:
+    """Serve MCP streamable HTTP on a private Unix socket (container has no network)."""
+    import uvicorn
+
+    sock = bind_private_socket(path)
+    app = server.streamable_http_app(
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[UDS_HOST],
+            allowed_origins=[],
+        ),
+    )
+    config = uvicorn.Config(
+        app,
+        log_level="warning",
+        access_log=False,
+        timeout_graceful_shutdown=5,
+    )
+    uvicorn.Server(config).run(sockets=[sock])
 
 
 if __name__ == "__main__":

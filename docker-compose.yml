@@ -38,9 +38,11 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Shell tool server (MCP over stdio). Single source of truth for its hardening: tests and
-  # the gateway launch it via `docker compose run --rm -T shell`. Profile keeps it out of
-  # `make dev` (a stdio server has no long-running listener).
+  # Shell tool server. Single source of truth for its hardening. Default transport: MCP
+  # streamable HTTP on a 0600 Unix socket in the dedicated `shell-sock` volume (the container
+  # has no network). Tests may also start it over stdio:
+  #   docker compose run --rm -T -e SHELL_TRANSPORT=stdio shell
+  # Profile keeps it out of `make dev` until the gateway is wired in.
   shell:
     profiles: ["sandbox"]
     build:
@@ -65,9 +67,36 @@ services:
       fsize: 10485760  # max 10 MiB per written file
     environment:
       SANDBOX_SHELL_ALLOWLIST: ${SANDBOX_SHELL_ALLOWLIST:-ls,cat,grep,wc,head,echo,date,python3}
+      SHELL_TRANSPORT: ${SHELL_TRANSPORT:-uds}
+      SHELL_SOCKET_PATH: /run/sentinel-shell/shell.sock
     volumes:
       - ${SHELL_SANDBOX_DIR:-./sandbox_runtime/fs}:/sandbox
+      - shell-sock:/run/sentinel-shell
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,stat,sys; sys.exit(0 if stat.S_ISSOCK(os.stat('/run/sentinel-shell/shell.sock').st_mode) else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Test-only client container: same image and uid, no network, mounts ONLY the socket volume.
+  # Runs a Python script from stdin (used to verify gateway/transports.py end to end).
+  shell-probe:
+    profiles: ["test"]
+    image: sentinel-mcp/shell:dev
+    entrypoint: ["python", "-"]
+    stdin_open: true
+    network_mode: none
+    read_only: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      SANDBOX_IN_CONTAINER: "0"
+    volumes:
+      - shell-sock:/run/sentinel-shell
 
 volumes:
   redis-data:
   postgres-data:
+  shell-sock:  # holds ONLY the shell server's Unix socket
