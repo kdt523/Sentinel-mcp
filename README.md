@@ -4,7 +4,7 @@
 
 **A session-aware, bidirectional security gateway for AI agents that use the Model Context Protocol (MCP).**
 
-> **Status: early development (Phase 0 — project setup).** Nothing below the architecture section works yet.
+> **Status: early development. Phase 0 (project setup) is complete; Phase 1 (gateway) is next.** Nothing beyond the dev tooling works yet.
 
 ---
 
@@ -71,7 +71,7 @@ make dev        # start redis + postgres (docker compose)
 
 ## Status
 
-- [ ] Phase 0 — Project setup _(in progress)_
+- [x] Phase 0 — Project setup _(done)_
 - [ ] Phase 1 — MCP tool servers + gateway (policy only)
 - [ ] Phase 2 — Dataset & benchmark
 - [ ] Phase 3 — Baselines
