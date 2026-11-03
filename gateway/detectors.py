@@ -156,6 +156,17 @@ def fingerprints_in_args(args: Mapping[str, Any]) -> set[str]:
     return out
 
 
+def redact_deep(value: Any) -> Any:
+    """``redact_secrets`` applied to every string nested in JSON-like data."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, Mapping):
+        return {str(k): redact_deep(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [redact_deep(v) for v in value]
+    return value
+
+
 def iter_strings(value: Any) -> Iterator[str]:
     """Yield every string nested anywhere inside JSON-like tool arguments."""
     if isinstance(value, str):

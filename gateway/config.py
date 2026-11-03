@@ -6,6 +6,7 @@ overridable via environment variables prefixed with ``SENTINEL_`` or a ``.env`` 
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
@@ -31,6 +32,23 @@ class Settings(BaseSettings):
     # --- storage -------------------------------------------------------------
     redis_url: str = "redis://127.0.0.1:6379/0"
     database_url: str = "postgresql+psycopg://sentinel:sentinel@127.0.0.1:5432/sentinel"
+
+    db_connect_timeout_s: int = Field(default=5, gt=0)
+    db_pool_size: int = Field(default=5, ge=1)
+
+    # --- decision log (async, never blocks deciding) ---------------------------
+    decision_log_queue_size: int = Field(default=10_000, ge=10)
+    decision_log_batch_size: int = Field(default=200, ge=1)
+    decision_log_flush_timeout_s: float = Field(default=10.0, gt=0)
+
+    # --- raw capture for dataset building (Phase 2) -----------------------------
+    # Writes FULL raw events (unredacted args/outputs) to capture_dir. Off by default and
+    # refused unless running in the sandbox (SANDBOX_IN_CONTAINER=1 or sandbox_mode=true).
+    capture_mode: bool = False
+    capture_dir: Path = Path("data/raw")
+    sandbox_mode: bool = Field(
+        default=False, description="Explicit flag: this gateway only serves the mock sandbox."
+    )
 
     redis_connect_timeout_s: float = Field(default=2.0, gt=0)
     redis_socket_timeout_s: float = Field(default=2.0, gt=0)
@@ -79,6 +97,19 @@ class Settings(BaseSettings):
     )
     log_level: LogLevel = "INFO"
     model_version: str = "policy-only-v0"
+
+    @property
+    def in_sandbox(self) -> bool:
+        return self.sandbox_mode or os.environ.get("SANDBOX_IN_CONTAINER") == "1"
+
+    @model_validator(mode="after")
+    def _capture_only_in_sandbox(self) -> Self:
+        if self.capture_mode and not self.in_sandbox:
+            raise ValueError(
+                "capture_mode writes raw unredacted events and is only allowed in the sandbox: "
+                "set SENTINEL_SANDBOX_MODE=true or run with SANDBOX_IN_CONTAINER=1"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_thresholds(self) -> Self:

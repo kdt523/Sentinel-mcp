@@ -48,5 +48,5 @@ policy-check: ## Validate the policy file and replay all policy scenarios
 bench: ## Benchmark a decider on a split (Phase 3)
 	@echo "bench: not implemented until Phase 3 (eval/benchmark.py)"; exit 1
 
-migrate: ## Apply DB migrations (Phase 1)
-	@echo "migrate: not implemented until Phase 1 (Alembic)"; exit 1
+migrate: ## Apply DB migrations to SENTINEL_DATABASE_URL
+	$(RUN) alembic upgrade head
