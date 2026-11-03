@@ -28,10 +28,10 @@ class Sandbox:
         """Map an agent-supplied relative path to an absolute path inside the root."""
         if "\x00" in user_path:
             raise SandboxViolation("path contains a null byte")
-        if PurePosixPath(user_path).is_absolute() or PureWindowsPath(user_path).is_absolute():
-            raise SandboxViolation("absolute paths are not allowed")
-        if PureWindowsPath(user_path).drive:
-            raise SandboxViolation("drive-qualified paths are not allowed")
+        # Reject anything anchored under EITHER convention so behaviour is identical on
+        # Linux and Windows hosts: "/x", "\\x", "C:\\x", "C:x", "//server/share".
+        if PurePosixPath(user_path).anchor or PureWindowsPath(user_path).anchor:
+            raise SandboxViolation("absolute or drive/root-anchored paths are not allowed")
         candidate = (self.root / user_path).resolve()  # follows symlinks
         if candidate != self.root and not candidate.is_relative_to(self.root):
             raise SandboxViolation("path escapes the sandbox root")
