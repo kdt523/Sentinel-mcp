@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Secrets
+.env
+
+# Data / models / experiments
+data/raw/
+data/cache/
+models/
+checkpoints/
+wandb/
+mlruns/
+*.onnx
+!tests/fixtures/*.onnx
+
+# Runtime artifacts
+outbox/
+sandbox_runtime/
