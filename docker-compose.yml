@@ -38,6 +38,36 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Shell tool server (MCP over stdio). Single source of truth for its hardening: tests and
+  # the gateway launch it via `docker compose run --rm -T shell`. Profile keeps it out of
+  # `make dev` (a stdio server has no long-running listener).
+  shell:
+    profiles: ["sandbox"]
+    build:
+      context: .
+      dockerfile: tools_servers/shell/Dockerfile
+    image: sentinel-mcp/shell:dev
+    stdin_open: true
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    cpus: 0.5
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    ulimits:
+      nofile: { soft: 256, hard: 256 }
+      fsize: 10485760  # max 10 MiB per written file
+    environment:
+      SANDBOX_SHELL_ALLOWLIST: ${SANDBOX_SHELL_ALLOWLIST:-ls,cat,grep,wc,head,echo,date,python3}
+    volumes:
+      - ${SHELL_SANDBOX_DIR:-./sandbox_runtime/fs}:/sandbox
+
 volumes:
   redis-data:
   postgres-data:

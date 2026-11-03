@@ -1,0 +1,20 @@
+# Keep build context small and free of secrets / local state
+.git
+.venv
+.env
+**/__pycache__
+.mypy_cache
+.ruff_cache
+.pytest_cache
+sandbox_runtime
+outbox
+data/raw
+data/cache
+models
+checkpoints
+wandb
+mlruns
+notebooks
+CLAUDE.md
+PLAN.md
+.claude
