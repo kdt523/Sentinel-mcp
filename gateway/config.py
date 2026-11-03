@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     session_risk_half_life_s: float = Field(
         default=600.0, gt=0, description="Half-life of the decayed cumulative risk."
     )
+    session_max_fingerprints: int = Field(
+        default=20_000, ge=100, description="Cap on stored taint fingerprints per session."
+    )
 
     # --- policy & enforcement -----------------------------------------------
     policy_path: Path = Path("policies/default.yaml")

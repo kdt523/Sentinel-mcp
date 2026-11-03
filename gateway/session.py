@@ -17,14 +17,18 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
+from redis.typing import EncodableT, FieldT
 
 from gateway.config import Settings
 from gateway.detectors import (
     egress_targets,
+    fingerprints,
     paths_in_args,
+    pii_labels,
     redact_secrets,
     secret_content_labels,
     secret_path_labels,
+    taint_class,
 )
 from gateway.models import Action, Decision, Direction, Event
 
@@ -80,9 +84,12 @@ class SessionState(BaseModel):
 
     session_id: str
     event_count: int = 0
+    request_count: int = 0
     history: list[CompactEvent] = Field(default_factory=list)
     files_read: list[str] = Field(default_factory=list)
     secret_taint: bool = False
+    pii_taint: bool = False
+    fingerprint_count: int = 0
     taint_sources: list[str] = Field(default_factory=list)
     egress_targets: list[str] = Field(default_factory=list)
     risk: float = 0.0  # decayed to "now" at read time
@@ -109,9 +116,11 @@ class SessionTracker:
         ttl_s: int = 86_400,
         history_len: int = 20,
         risk_half_life_s: float = 600.0,
+        max_fingerprints: int = 20_000,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._r = redis
+        self.max_fingerprints = max_fingerprints
         self.ttl_s = ttl_s
         self.history_len = history_len
         self.half_life_s = risk_half_life_s
@@ -124,6 +133,7 @@ class SessionTracker:
             ttl_s=settings.session_ttl_s,
             history_len=settings.session_history_len,
             risk_half_life_s=settings.session_risk_half_life_s,
+            max_fingerprints=settings.session_max_fingerprints,
         )
 
     @staticmethod
@@ -137,7 +147,7 @@ class SessionTracker:
     ) -> None:
         """Record one decided event. For outputs, pass the originating request event."""
         sid = event.session_id
-        k = {p: self._k(sid, p) for p in ("meta", "history", "files", "taint", "egress")}
+        k = {p: self._k(sid, p) for p in ("meta", "history", "files", "taint", "egress", "fp")}
         compact = CompactEvent(
             ts=event.ts,
             direction=event.direction,
@@ -155,15 +165,27 @@ class SessionTracker:
             if passed:
                 files = set(paths_in_args(event.args))
         elif event.output is not None and passed:
-            taint = secret_content_labels(event.output)
+            taint = secret_content_labels(event.output) | pii_labels(event.output)
             if request is not None and request.args is not None:
                 for path in paths_in_args(request.args):
                     taint |= secret_path_labels(path)
+        fps: dict[FieldT, EncodableT] = {}
+        if taint and event.output is not None:
+            # Secret outranks PII when one output carries both.
+            cls = "secret" if any(taint_class(t) == "secret" for t in taint) else "pii"
+            if await self._r.hlen(k["fp"]) < self.max_fingerprints:
+                fps = dict.fromkeys(
+                    sorted(fingerprints(event.output, sensitive_lines_only=True)), cls
+                )
 
         async with self._r.pipeline(transaction=True) as pipe:
             pipe.rpush(k["history"], compact.model_dump_json())
             pipe.ltrim(k["history"], -self.history_len, -1)
             pipe.hincrby(k["meta"], "event_count", 1)
+            if event.direction is Direction.REQUEST:
+                pipe.hincrby(k["meta"], "request_count", 1)
+            if fps:
+                pipe.hset(k["fp"], mapping=fps)
             if files:
                 pipe.sadd(k["files"], *sorted(files))
             if taint:
@@ -224,6 +246,18 @@ class SessionTracker:
     async def is_revoked(self, session_id: str, qualified_tool: str) -> bool:
         return bool(await self._r.sismember(self._k(session_id, "revoked"), qualified_tool))
 
+    async def match_fingerprints(self, session_id: str, hashes: set[str]) -> set[str]:
+        """Taint classes (``secret``/``pii``) whose stored fingerprints appear in ``hashes``."""
+        if not hashes:
+            return set()
+        ordered = sorted(hashes)
+        found: set[str] = set()
+        key = self._k(session_id, "fp")
+        for i in range(0, len(ordered), 500):
+            values = await self._r.hmget(key, ordered[i : i + 500])
+            found |= {_s(v) for v in values if v is not None}
+        return found
+
     async def get(self, session_id: str) -> SessionState:
         k = {
             p: self._k(session_id, p)
@@ -236,7 +270,8 @@ class SessionTracker:
             pipe.smembers(k["taint"])
             pipe.smembers(k["egress"])
             pipe.smembers(k["revoked"])
-            meta_raw, hist, files, taint, egress, revoked = await pipe.execute()
+            pipe.hlen(self._k(session_id, "fp"))
+            meta_raw, hist, files, taint, egress, revoked, n_fp = await pipe.execute()
         meta = {_s(a): _s(b) for a, b in meta_raw.items()}
         risk = 0.0
         if "risk_accum" in meta:
@@ -246,9 +281,12 @@ class SessionTracker:
         return SessionState(
             session_id=session_id,
             event_count=int(meta.get("event_count", "0")),
+            request_count=int(meta.get("request_count", "0")),
             history=[CompactEvent.model_validate_json(_s(h)) for h in hist],
             files_read=sorted(_s(x) for x in files),
-            secret_taint=bool(taint_list),
+            secret_taint=any(taint_class(t) == "secret" for t in taint_list),
+            pii_taint=any(taint_class(t) == "pii" for t in taint_list),
+            fingerprint_count=int(n_fp),
             taint_sources=taint_list,
             egress_targets=sorted(_s(x) for x in egress),
             risk=risk,
@@ -271,9 +309,10 @@ def summary(state: SessionState, *, max_recent: int = 5) -> str:
         f"Events so far: {state.event_count}. Cumulative risk: {state.risk:.2f}.",
         f"Files read: {_list(state.files_read)}.",
         (
-            f"Secret taint: YES ({_list(state.taint_sources)})."
-            if state.secret_taint
-            else "Secret taint: no."
+            f"Taint: {'SECRET ' if state.secret_taint else ''}{'PII ' if state.pii_taint else ''}"
+            f"({_list(state.taint_sources)})."
+            if state.taint_sources
+            else "Taint: none."
         ),
         f"Egress targets: {_list(state.egress_targets)}.",
         f"Revoked tools: {_list(state.revoked_tools)}.",

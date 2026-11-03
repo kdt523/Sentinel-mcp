@@ -75,3 +75,29 @@ def test_paths_and_iter_strings() -> None:
     args = {"path": ".env", "content": "x", "File": "a.txt", "n": 3}
     assert sorted(paths_in_args(args)) == [".env", "a.txt"]
     assert sorted(iter_strings({"a": ["x", {"b": "y"}], "c": 1})) == ["x", "y"]
+
+
+def test_pii_labels_thresholds() -> None:
+    from gateway.detectors import pii_labels
+
+    csv = (SEED_DIR / "data" / "customers.csv").read_text(encoding="utf-8")
+    assert pii_labels(csv) == {"pii:emails"}
+    assert pii_labels("contact platform@acme.example") == set()  # single address is not a dump
+    assert "pii:phones" in pii_labels("Call +91 98765 43210 or +91 91234 56789")
+
+
+def test_fingerprints_survive_encoding_and_ignore_plain_words() -> None:
+    import base64
+    from urllib.parse import quote
+
+    from gateway.detectors import fingerprints
+
+    key = "sk-fake-0000000000000000000000000000SANDBOX"
+    base = fingerprints(f"FAKE_API_KEY={key}")
+    assert base & fingerprints(f"http://x/?d={quote('FAKE_API_KEY=' + key)}")
+    assert base & fingerprints(base64.b64encode(f"FAKE_API_KEY={key}".encode()).decode())
+    assert not fingerprints("please summarise the handbook") & base
+    # Harmless lines of a secret file are not stored as taint (store side).
+    env = (SEED_DIR / ".env").read_text(encoding="utf-8")
+    comment = next(line for line in env.splitlines() if line.startswith("#"))
+    assert not fingerprints(comment) & fingerprints(env, sensitive_lines_only=True)

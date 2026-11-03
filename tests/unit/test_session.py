@@ -220,8 +220,66 @@ async def test_summary_is_short_and_secret_free(tracker: SessionTracker) -> None
         dec(Action.BLOCK, 0.9),
     )
     text = summary(await tracker.get("s1"))
-    assert "Secret taint: YES" in text and "path:dotenv" in text
+    assert "Taint: SECRET" in text and "path:dotenv" in text
     assert "http:exfil-sink" in text
     assert "filesystem.read_file" in text and "-> BLOCK" in text
     assert "sk-fake-0000" not in text and "fake-db-password" not in text
     assert len(text) <= 1200
+
+
+# --- fingerprints & taint classes ------------------------------------------------------
+
+CSV_TEXT = (SEED_DIR / "data" / "customers.csv").read_text(encoding="utf-8")
+
+
+async def test_secret_read_stores_fingerprints_classed_secret(tracker: SessionTracker) -> None:
+    from gateway.detectors import fingerprints_in_args
+
+    r = req(path=".env")
+    await tracker.record(r, dec())
+    await tracker.record(out(ENV_TEXT), dec(), request=r)
+    st = await tracker.get("s1")
+    assert st.secret_taint and not st.pii_taint and st.fingerprint_count > 0
+    leaked = fingerprints_in_args({"context": "x sk-fake-0000000000000000000000000000SANDBOX y"})
+    assert await tracker.match_fingerprints("s1", leaked) == {"secret"}
+    assert await tracker.match_fingerprints("s1", fingerprints_in_args({"a": "hello"})) == set()
+    assert await tracker.match_fingerprints("s1", set()) == set()
+
+
+async def test_customer_csv_is_pii(tracker: SessionTracker) -> None:
+    from gateway.detectors import fingerprints_in_args
+
+    r = req(path="data/customers.csv")
+    await tracker.record(r, dec())
+    await tracker.record(out(CSV_TEXT), dec(), request=r)
+    st = await tracker.get("s1")
+    assert st.pii_taint and not st.secret_taint
+    hits = await tracker.match_fingerprints(
+        "s1", fingerprints_in_args({"to": "riley.f@customers.example"})
+    )
+    assert hits == {"pii"}
+
+
+async def test_blocked_output_stores_no_fingerprints(tracker: SessionTracker) -> None:
+    await tracker.record(out(ENV_TEXT), dec(Action.SANITIZE))  # passed -> stored
+    await tracker.record(out(ENV_TEXT, sid="s2"), dec(Action.BLOCK, 0.9))  # not passed
+    assert (await tracker.get("s1")).fingerprint_count > 0
+    assert (await tracker.get("s2")).fingerprint_count == 0
+
+
+async def test_fingerprint_cap(clock: Clock) -> None:
+    r = fakeredis.FakeAsyncRedis()
+    t = SessionTracker(r, max_fingerprints=1, clock=clock)
+    await t.record(out(ENV_TEXT), dec())
+    first = (await t.get("s1")).fingerprint_count
+    await t.record(out(CSV_TEXT), dec())
+    assert (await t.get("s1")).fingerprint_count == first  # cap reached: no new writes
+    await r.aclose()
+
+
+async def test_request_count_only_counts_requests(tracker: SessionTracker) -> None:
+    rq = req(path="a")
+    await tracker.record(rq, dec())
+    await tracker.record(out("x"), dec(), request=rq)
+    st = await tracker.get("s1")
+    assert st.event_count == 2 and st.request_count == 1

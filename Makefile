@@ -1,6 +1,6 @@
 # SentinelMCP developer commands. Requires: uv, docker (for dev/down/test-int).
 .DEFAULT_GOAL := help
-.PHONY: help install dev down test test-int attacks lint fmt bench migrate
+.PHONY: help install dev down test test-int attacks lint fmt policy-check bench migrate
 
 UV     ?= uv
 RUN    := $(UV) run
@@ -40,6 +40,10 @@ lint: ## ruff + format check + mypy
 fmt: ## Auto-format and fix lint
 	$(RUN) ruff format .
 	$(RUN) ruff check --fix .
+
+policy-check: ## Validate the policy file and replay all policy scenarios
+	$(RUN) python -m gateway.policy validate
+	@for f in policies/scenarios/*.jsonl; do echo "== $$f"; $(RUN) python -m gateway.policy dry-run --scenario $$f || exit 1; done
 
 bench: ## Benchmark a decider on a split (Phase 3)
 	@echo "bench: not implemented until Phase 3 (eval/benchmark.py)"; exit 1

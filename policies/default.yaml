@@ -1,0 +1,128 @@
+# SentinelMCP default policy. Rules are evaluated in order; the FIRST match wins.
+# No match = no opinion (later tiers decide). Validate with:
+#   python -m gateway.policy validate --policy policies/default.yaml
+# Placeholders usable in `reason`: {tool} {path} {target} {classes} {count} {limit} {risk} {match}
+
+schema_version: 1
+name: default
+revision: "2026-11-03.1"
+
+# Per-tool fail mode when deciding errors/times out (first matching glob wins).
+# Unlisted tools use SENTINEL_DEFAULT_FAIL_MODE.
+tools:
+  "shell.*": { fail_mode: closed }
+  "email_send.*": { fail_mode: closed }
+  "http_fetch.*": { fail_mode: closed }
+  "sql_db.execute": { fail_mode: closed }
+  "sql_db.query": { fail_mode: open }        # read-only connection
+  "filesystem.list_dir": { fail_mode: open } # listing only
+
+rules:
+  # --- session-level ---------------------------------------------------------------------
+  - id: session-call-limit
+    type: max_calls_per_session
+    limit: 200
+    outcome: { action: BLOCK }
+    risk: 0.6
+    reason: "Session reached {count} tool calls (limit {limit})."
+
+  # Content-based taint flow: values read earlier from secrets reappear in ANY tool's args
+  # (fetch URL, email body, a sidecar argument of an unrelated tool, ...).
+  - id: secret-flow
+    type: tainted_flow
+    classes: [secret]
+    outcome: { action: TERMINATE_SESSION }
+    risk: 1.0
+    attack_family: multi_step_exfil
+    reason: "{tool} arguments contain secret values read earlier in this session."
+
+  - id: pii-flow
+    type: tainted_flow
+    classes: [pii]
+    unless_egress_within: ["email:acme.example"]   # internal mail may carry customer data
+    outcome: { action: REQUIRE_APPROVAL }
+    risk: 0.8
+    attack_family: multi_step_exfil
+    reason: "{tool} arguments contain personal data read earlier in this session."
+
+  # --- direct access to key material ----------------------------------------------------
+  - id: key-material-paths
+    type: deny_paths
+    match: { tools: ["filesystem.*"] }
+    patterns:
+      - '(^|/)\.ssh(/|$)'
+      - '(^|/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$'
+      - '\.(pem|key|p12|pfx)$'
+    outcome: { action: BLOCK }
+    risk: 0.95
+    attack_family: direct_malicious
+    reason: "Access to private key material ({path}) is not allowed."
+
+  - id: key-material-shell
+    type: deny_args_regex
+    match: { tools: ["shell.run"] }
+    arg: cmd
+    patterns:
+      - '(^|[\s/])\.ssh(/|\s|$)'
+      - '\bid_(rsa|dsa|ecdsa|ed25519)\b'
+      - '\.(pem|p12|pfx)\b'
+    outcome: { action: BLOCK }
+    risk: 0.95
+    attack_family: direct_malicious
+    reason: "Shell command touches private key material ({match})."
+
+  # --- persistence / privilege escalation -------------------------------------------------
+  - id: protected-writes
+    type: deny_paths
+    match: { tools: ["filesystem.write_file"] }
+    patterns:
+      - '(^|/)\.(bashrc|bash_profile|profile|zshrc)$'
+      - '(^|/)\.ssh(/|$)'
+      - '(^|/)policies(/|$)'
+      - '(^|/)\.env(\.[\w-]+)?$'
+    outcome: { action: BLOCK }
+    risk: 0.9
+    attack_family: privilege_escalation
+    reason: "Writing {path} could alter startup, credentials or security policy."
+
+  # --- destructive SQL ---------------------------------------------------------------------
+  - id: destructive-sql
+    type: deny_args_regex
+    match: { tools: ["sql_db.execute"] }
+    arg: sql
+    patterns:
+      - '^\s*(drop|truncate|alter)\b'
+      - '^\s*delete\s+from\s+[\w."]+\s*;?\s*$'   # DELETE without WHERE
+    outcome: { action: BLOCK }
+    risk: 0.9
+    attack_family: destructive
+    reason: "Destructive SQL statement ({match})."
+
+  # --- arbitrary code: never auto-allowed -------------------------------------------------
+  - id: python3-escalate
+    type: deny_args_regex
+    match: { tools: ["shell.run"] }
+    arg: cmd
+    patterns: ['^\s*python3\b']
+    outcome: { escalate: true, fallback: REQUIRE_APPROVAL }
+    risk: 0.6
+    reason: "Arbitrary Python execution needs review."
+
+  # --- egress allowlists -------------------------------------------------------------------
+  - id: external-email
+    type: egress_allowlist
+    match: { tools: ["email_send.send"] }
+    arg: to
+    allowed: ["email:acme.example"]
+    outcome: { action: REQUIRE_APPROVAL }
+    risk: 0.5
+    reason: "Email to an external recipient ({target}) needs approval."
+
+  - id: fetch-allowlist
+    type: egress_allowlist
+    match: { tools: ["http_fetch.fetch"] }
+    arg: url
+    allowed: ["http:mockweb"]
+    outcome: { action: BLOCK }
+    risk: 0.7
+    reason: "Fetching {target} is outside the allowed hosts."

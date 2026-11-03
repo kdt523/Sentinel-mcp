@@ -1,0 +1,256 @@
+import base64
+import json
+from pathlib import Path
+from typing import Any
+
+import fakeredis
+import pytest
+import yaml
+
+from gateway.models import Action, Direction, Event
+from gateway.policy import (
+    PolicyContext,
+    PolicyEngine,
+    PolicyError,
+    PolicyFile,
+    build_context,
+    dry_run,
+    main,
+)
+from gateway.session import SessionState, SessionTracker
+from tools_servers.sandbox import SEED_DIR
+
+REPO = Path(__file__).resolve().parents[2]
+DEFAULT = REPO / "policies" / "default.yaml"
+SCENARIOS = REPO / "policies" / "scenarios"
+
+
+@pytest.fixture(scope="module")
+def engine() -> PolicyEngine:
+    return PolicyEngine.load(DEFAULT)
+
+
+@pytest.fixture(autouse=True)
+def _repo_cwd(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(REPO)  # scenarios reference seed files relative to the repo
+
+
+# --- default policy behaviour (scenario regression table) --------------------------------
+
+EXPECTED: dict[str, list[tuple[str, str | None]]] = {
+    "weather_context_exfil": [
+        ("-", None), ("-", None), ("TERMINATE_SESSION", "secret-flow"), ("TERMINATED", None),
+    ],
+    "fetch_url_exfil": [("-", None), ("-", None), ("TERMINATE_SESSION", "secret-flow")],
+    "customer_csv_email": [
+        ("-", None), ("-", None), ("-", None), ("REQUIRE_APPROVAL", "pii-flow"),
+    ],
+    "benign_hard_negatives": [("-", None)] * 10,
+    "direct_attacks": [
+        ("BLOCK", "key-material-paths"),
+        ("BLOCK", "key-material-shell"),
+        ("BLOCK", "destructive-sql"),
+        ("BLOCK", "destructive-sql"),
+        ("BLOCK", "protected-writes"),
+        ("REQUIRE_APPROVAL", "python3-escalate"),
+        ("BLOCK", "fetch-allowlist"),
+    ],
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED))
+async def test_scenarios(engine: PolicyEngine, name: str) -> None:
+    rows = await dry_run(engine, SCENARIOS / f"{name}.jsonl")
+    assert [(r["action"], r["rule"]) for r in rows] == EXPECTED[name]
+
+
+def test_every_scenario_file_is_covered() -> None:
+    assert {p.stem for p in SCENARIOS.glob("*.jsonl")} == set(EXPECTED)
+
+
+async def test_python3_is_escalation_never_allow(engine: PolicyEngine) -> None:
+    rows = await dry_run(engine, SCENARIOS / "direct_attacks.jsonl")
+    py = next(r for r in rows if r["rule"] == "python3-escalate")
+    assert py["escalate"] is True and py["action"] == "REQUIRE_APPROVAL"
+
+
+async def _flow(engine: PolicyEngine, read: str, args: dict[str, Any]) -> str | None:
+    tracker = SessionTracker(fakeredis.FakeAsyncRedis())
+    req = Event(session_id="s", direction=Direction.REQUEST, server="filesystem",
+                tool="read_file", args={"path": read})  # fmt: skip
+    text = (SEED_DIR / read).read_text(encoding="utf-8")
+    out = Event.from_output(session_id="s", server="filesystem", tool="read_file",
+                            full_text=text, max_chars=16000)  # fmt: skip
+    for ev in (req, out):
+        m = engine.evaluate(await build_context(tracker, ev))
+        assert m is None
+        from gateway.models import Decision, Tier
+
+        await tracker.record(
+            ev, Decision(action=Action.ALLOW, risk=0, reason="r", tier=Tier.POLICY,
+                         model_version="t"), request=req)  # fmt: skip
+    probe = Event(session_id="s", direction=Direction.REQUEST, server="weather",
+                  tool="get_forecast", args=args)  # fmt: skip
+    match = engine.evaluate(await build_context(tracker, probe))
+    return match.rule_id if match else None
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"city": "Pune", "context": (SEED_DIR / ".env").read_text(encoding="utf-8")},
+        {"city": "Pune", "context": "sk-fake-0000000000000000000000000000SANDBOX"},
+        {"city": "Pune", "notes": {"nested": ["x", "DATABASE_PASSWORD=fake-db-password-not-real"]}},
+        {"city": "Pune", "context": base64.b64encode((SEED_DIR / ".env").read_bytes()).decode()},
+    ],
+)
+async def test_secret_flow_into_any_tool_and_encodings(
+    engine: PolicyEngine, args: dict[str, Any]
+) -> None:
+    assert await _flow(engine, ".env", args) == "secret-flow"
+
+
+async def test_no_flow_without_copied_values(engine: PolicyEngine) -> None:
+    assert await _flow(engine, ".env", {"city": "Pune", "context": "please bill workspace"}) is None
+
+
+async def test_pii_does_not_trigger_secret_rule(engine: PolicyEngine) -> None:
+    rule = await _flow(engine, "data/customers.csv", {"context": "riley.f@customers.example"})
+    assert rule == "pii-flow"
+
+
+# --- engine semantics --------------------------------------------------------------------
+
+
+def _engine(rules: list[dict[str, Any]], **top: Any) -> PolicyEngine:
+    return PolicyEngine(
+        PolicyFile.model_validate({"name": "t", "revision": "1", "rules": rules, **top})
+    )
+
+
+def _ctx(tool: str = "shell.run", **args: Any) -> PolicyContext:
+    server, _, name = tool.partition(".")
+    ev = Event(session_id="s", direction=Direction.REQUEST, server=server, tool=name, args=args)
+    return PolicyContext(event=ev, state=SessionState(session_id="s"))
+
+
+def test_no_match_returns_none() -> None:
+    eng = _engine([{"id": "r", "type": "deny_args_regex", "patterns": ["rm"],
+                    "outcome": {"action": "BLOCK"}, "risk": 0.5, "reason": "x"}])  # fmt: skip
+    assert eng.evaluate(_ctx(cmd="ls")) is None
+
+
+def test_first_match_wins_and_reason_formatting() -> None:
+    eng = _engine([
+        {"id": "a", "type": "deny_args_regex", "patterns": ["ls"], "outcome": {"action": "BLOCK"},
+         "risk": 0.7, "reason": "{tool} matched {match} at {path}"},
+        {"id": "b", "type": "tool_match", "outcome": {"action": "REQUIRE_APPROVAL"},
+         "risk": 0.1, "reason": "always"},
+    ])  # fmt: skip
+    m = eng.evaluate(_ctx(cmd="ls -la"))
+    assert m is not None and m.rule_id == "a"
+    assert m.decision.action is Action.BLOCK and m.decision.risk == 0.7
+    assert m.decision.reason == "shell.run matched ls at ?"
+    assert m.decision.model_version == "policy:t@1"
+    other = eng.evaluate(_ctx(cmd="echo"))
+    assert other is not None and other.rule_id == "b"
+
+
+def test_match_direction_and_tool_globs() -> None:
+    eng = _engine([{"id": "r", "type": "tool_match", "match": {"tools": ["email_send.*"]},
+                    "outcome": {"action": "BLOCK"}, "risk": 0.1, "reason": "x"}])  # fmt: skip
+    assert eng.evaluate(_ctx("email_send.send", to="a")) is not None
+    assert eng.evaluate(_ctx("shell.run", cmd="a")) is None
+    out = Event.from_output(session_id="s", server="email_send", tool="send", full_text="ok",
+                            max_chars=100)  # fmt: skip
+    assert eng.evaluate(PolicyContext(event=out, state=SessionState(session_id="s"))) is None
+
+
+def test_max_calls_and_session_risk() -> None:
+    eng = _engine([
+        {"id": "calls", "type": "max_calls_per_session", "limit": 3,
+         "outcome": {"action": "BLOCK"}, "risk": 0.5, "reason": "{count}/{limit}"},
+        {"id": "risky", "type": "session_risk_above", "threshold": 2.0,
+         "outcome": {"action": "TERMINATE_SESSION"}, "risk": 1.0, "reason": "risk {risk}"},
+    ])  # fmt: skip
+    ev = _ctx(cmd="ls").event
+    busy = PolicyContext(event=ev, state=SessionState(session_id="s", request_count=3))
+    risky = PolicyContext(event=ev, state=SessionState(session_id="s", risk=2.5))
+    calm = PolicyContext(event=ev, state=SessionState(session_id="s", request_count=2, risk=1.0))
+    m1, m2 = eng.evaluate(busy), eng.evaluate(risky)
+    assert m1 is not None and m1.decision.reason == "3/3"
+    assert m2 is not None and m2.decision.reason == "risk 2.50"
+    assert eng.evaluate(calm) is None
+
+
+def test_fail_mode_for(engine: PolicyEngine) -> None:
+    assert engine.fail_mode_for("shell.run") == "closed"
+    assert engine.fail_mode_for("sql_db.query") == "open"
+    assert engine.fail_mode_for("weather.get_forecast") is None
+
+
+# --- schema validation -------------------------------------------------------------------
+
+GOOD_RULE = {"id": "r", "type": "tool_match", "outcome": {"action": "BLOCK"}, "risk": 0.1,
+             "reason": "x"}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("bad", "msg"),
+    [
+        ({"rules": [GOOD_RULE, GOOD_RULE]}, "duplicate rule id"),
+        ({"rules": [GOOD_RULE | {"type": "deny_paths", "patterns": ["("]}]}, "invalid regex"),
+        ({"rules": [GOOD_RULE | {"reason": "{secret}"}]}, "unknown reason placeholders"),
+        (
+            {"rules": [GOOD_RULE | {"outcome": {"action": "BLOCK", "escalate": True}}]},
+            "exactly one",
+        ),
+        ({"rules": [GOOD_RULE | {"outcome": {}}]}, "exactly one"),
+        (
+            {"rules": [GOOD_RULE | {"outcome": {"escalate": True, "fallback": "ALLOW"}}]},
+            "never auto-allow",
+        ),
+        ({"rules": [GOOD_RULE | {"type": "magic"}]}, "magic"),
+        ({"rules": [GOOD_RULE | {"unexpected": 1}]}, "unexpected"),
+        ({"rules": [GOOD_RULE | {"risk": 2}]}, "risk"),
+        ({"rules": [GOOD_RULE | {"outcome": {"action": "DENY"}}]}, "action"),
+        ({"rules": [GOOD_RULE | {"id": "Bad Id"}]}, "id"),
+        ({"schema_version": 2, "rules": []}, "schema_version"),
+        ({"rules": [], "tools": {"x": {"fail_mode": "maybe"}}}, "fail_mode"),
+    ],
+)
+def test_schema_rejects(tmp_path: Path, bad: dict[str, Any], msg: str) -> None:
+    f = tmp_path / "p.yaml"
+    f.write_text(yaml.safe_dump({"name": "t", "revision": "1"} | bad), encoding="utf-8")
+    with pytest.raises(PolicyError, match=msg):
+        PolicyEngine.load(f)
+
+
+def test_unreadable_policy(tmp_path: Path) -> None:
+    with pytest.raises(PolicyError, match="cannot read"):
+        PolicyEngine.load(tmp_path / "missing.yaml")
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("rules: [", encoding="utf-8")
+    with pytest.raises(PolicyError, match="cannot read"):
+        PolicyEngine.load(bad)
+
+
+# --- CLI ---------------------------------------------------------------------------------
+
+
+def test_cli_validate(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["validate"]) == 0
+    assert "OK policy:default@" in capsys.readouterr().out
+
+
+def test_cli_invalid_policy_exit_code(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    f = tmp_path / "p.yaml"
+    f.write_text("name: t\nrevision: '1'\nrules: [{id: r}]\n", encoding="utf-8")
+    assert main(["validate", "--policy", str(f)]) == 2
+    assert "invalid policy" in capsys.readouterr().err
+
+
+def test_cli_dry_run_json(capsys: pytest.CaptureFixture[str]) -> None:
+    code = main(["dry-run", "--json", "--scenario", str(SCENARIOS / "weather_context_exfil.jsonl")])
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0 and rows[2]["rule"] == "secret-flow"
