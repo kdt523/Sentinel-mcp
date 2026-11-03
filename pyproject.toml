@@ -32,10 +32,9 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "pre-commit>=3.8",
-    "fakeredis>=2.24",
+    "fakeredis[lua]>=2.24",
     "testcontainers>=4.8",
     "types-PyYAML",
-    "types-redis",
 ]
 # GPU-only extras: install on Colab/Kaggle/rented GPU, not on the laptop.
 train = [

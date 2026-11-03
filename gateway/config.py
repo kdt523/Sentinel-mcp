@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     database_url: str = "postgresql+psycopg://sentinel:sentinel@127.0.0.1:5432/sentinel"
 
+    redis_connect_timeout_s: float = Field(default=2.0, gt=0)
+    redis_socket_timeout_s: float = Field(default=2.0, gt=0)
+
+    # --- session tracker -----------------------------------------------------
+    session_ttl_s: int = Field(default=86_400, gt=0, description="Idle expiry of session state.")
+    session_history_len: int = Field(default=20, ge=1, le=500)
+    session_risk_half_life_s: float = Field(
+        default=600.0, gt=0, description="Half-life of the decayed cumulative risk."
+    )
+
     # --- policy & enforcement -----------------------------------------------
     policy_path: Path = Path("policies/default.yaml")
     shadow_mode: bool = Field(
