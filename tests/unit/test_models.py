@@ -193,6 +193,7 @@ def test_cached_decision_keeps_original_tier() -> None:
         {"reason": "x" * (REASON_MAX_CHARS + 1)},
         {"action": "DENY"},
         {"tier": "cache"},
+        {"rule_id": "x" * 81},
     ],
 )
 def test_invalid_decisions(kw: dict[str, object]) -> None:

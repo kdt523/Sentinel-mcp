@@ -22,12 +22,11 @@ dependencies = [
     "pyyaml>=6.0",
     "prometheus-client>=0.20",
     "tenacity>=8.5",
-    # In-memory Redis for `python -m gateway.policy dry-run` (no live Redis needed).
-    "fakeredis[lua]>=2.24",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "sentinel-mcp[tools]",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
@@ -36,6 +35,10 @@ dev = [
     "pre-commit>=3.8",
     "testcontainers>=4.8",
     "types-PyYAML",
+]
+# Operator tooling: in-memory Redis for `python -m gateway.policy dry-run`.
+tools = [
+    "fakeredis[lua]>=2.24",
 ]
 # GPU-only extras: install on Colab/Kaggle/rented GPU, not on the laptop.
 train = [

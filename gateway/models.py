@@ -40,7 +40,8 @@ class Tier(StrEnum):
     POLICY = "policy"
     FAST = "fast"
     GUARD = "guard"
-    FALLBACK = "fallback"  # fail-mode decision after an error/timeout
+    FALLBACK = "fallback"  # fail-mode decision after an error/timeout, or unserved escalation
+    DEFAULT = "default"  # no tier had an opinion -> ALLOW, risk 0
 
 
 def _utcnow() -> datetime:
@@ -154,6 +155,7 @@ class Decision(_Frozen):
     attack_family: str | None = None
     reason: str = Field(min_length=1, max_length=REASON_MAX_CHARS)
     tier: Tier  # tier that originally produced the verdict (kept when served from cache)
+    rule_id: str | None = Field(default=None, max_length=80)  # matched policy rule, if any
     cached: bool = False
     latency_ms: float = Field(default=0.0, ge=0)
     model_version: str = Field(min_length=1)

@@ -254,3 +254,20 @@ def test_cli_dry_run_json(capsys: pytest.CaptureFixture[str]) -> None:
     code = main(["dry-run", "--json", "--scenario", str(SCENARIOS / "weather_context_exfil.jsonl")])
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert code == 0 and rows[2]["rule"] == "secret-flow"
+
+
+def test_dry_run_without_tools_extra_errors_clearly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "fakeredis", None)  # simulate missing optional extra
+    code = main(["dry-run", "--scenario", str(SCENARIOS / "direct_attacks.jsonl")])
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "uv sync --extra tools" in err
+
+
+async def test_policy_decisions_carry_rule_id(engine: PolicyEngine) -> None:
+    rows = await dry_run(engine, SCENARIOS / "direct_attacks.jsonl")
+    assert all(r["rule"] for r in rows)

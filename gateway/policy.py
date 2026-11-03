@@ -289,9 +289,13 @@ class PolicyFile(_Strict):
 
 
 class PolicyMatch(_Strict):
-    rule_id: str
     escalate: bool
     decision: Decision  # final decision, or the fallback when escalate=True
+
+    @property
+    def rule_id(self) -> str:
+        assert self.decision.rule_id is not None
+        return self.decision.rule_id
 
 
 class _SafeFormat(dict[str, str]):
@@ -341,10 +345,11 @@ class PolicyEngine:
                 attack_family=rule.attack_family,
                 reason=rule.reason.format_map(fmt)[:500],
                 tier=Tier.POLICY,
+                rule_id=rule.id,
                 latency_ms=(time.perf_counter() - t0) * 1000,
                 model_version=self.model_version,
             )
-            return PolicyMatch(rule_id=rule.id, escalate=rule.outcome.escalate, decision=decision)
+            return PolicyMatch(escalate=rule.outcome.escalate, decision=decision)
         return None
 
 
@@ -405,7 +410,13 @@ def _scenario_events(path: Path, session_id: str, max_chars: int) -> list[Event]
 
 async def dry_run(engine: PolicyEngine, scenario: Path) -> list[dict[str, Any]]:
     """Replay a scenario through the policy with an in-memory session (no Redis needed)."""
-    import fakeredis
+    try:
+        import fakeredis
+    except ImportError as exc:  # optional extra
+        raise PolicyError(
+            "policy dry-run needs the 'tools' extra (in-memory Redis): "
+            "uv sync --extra tools   (or: pip install 'sentinel-mcp[tools]')"
+        ) from exc
 
     redis = fakeredis.FakeAsyncRedis()
     tracker = SessionTracker(redis)
@@ -422,7 +433,7 @@ async def dry_run(engine: PolicyEngine, scenario: Path) -> list[dict[str, Any]]:
                 continue
             match = engine.evaluate(await build_context(tracker, event))
             decision = match.decision if match else Decision(
-                action=Action.ALLOW, risk=0.0, reason="no policy opinion", tier=Tier.POLICY,
+                action=Action.ALLOW, risk=0.0, reason="no policy opinion", tier=Tier.DEFAULT,
                 model_version=engine.model_version,
             )  # fmt: skip
             await tracker.record(event, decision, request=last_request.get(event.qualified_tool))
@@ -464,7 +475,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"OK {engine.model_version}: {len(engine.policy.rules)} rules")
         return 0
 
-    rows = asyncio.run(dry_run(engine, args.scenario))
+    try:
+        rows = asyncio.run(dry_run(engine, args.scenario))
+    except PolicyError as exc:
+        print(exc, file=sys.stderr)
+        return 3
     for r in rows:
         if args.json:
             print(json.dumps(r))

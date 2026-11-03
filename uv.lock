@@ -4202,7 +4202,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
-    { name = "fakeredis", extra = ["lua"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "mcp" },
@@ -4224,6 +4223,7 @@ agents = [
     { name = "langgraph" },
 ]
 dev = [
+    { name = "fakeredis", extra = ["lua"] },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -4237,6 +4237,9 @@ serve = [
     { name = "onnxruntime" },
     { name = "optimum", extra = ["onnxruntime"] },
     { name = "vllm", marker = "sys_platform == 'linux'" },
+]
+tools = [
+    { name = "fakeredis", extra = ["lua"] },
 ]
 train = [
     { name = "accelerate" },
@@ -4263,7 +4266,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "datasets", marker = "extra == 'train'", specifier = ">=3.0" },
     { name = "datasketch", marker = "extra == 'train'", specifier = ">=1.6" },
-    { name = "fakeredis", extras = ["lua"], specifier = ">=2.24" },
+    { name = "fakeredis", extras = ["lua"], marker = "extra == 'tools'", specifier = ">=2.24" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "langchain-openai", marker = "extra == 'agents'", specifier = ">=0.2" },
@@ -4286,6 +4289,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "sentinel-mcp", extras = ["tools"], marker = "extra == 'dev'" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "streamlit", marker = "extra == 'ui'", specifier = ">=1.39" },
     { name = "structlog", specifier = ">=24.1" },
@@ -4300,7 +4304,7 @@ requires-dist = [
     { name = "vllm", marker = "sys_platform == 'linux' and extra == 'serve'" },
     { name = "wandb", marker = "extra == 'train'", specifier = ">=0.18" },
 ]
-provides-extras = ["dev", "train", "serve", "agents", "ui"]
+provides-extras = ["dev", "tools", "train", "serve", "agents", "ui"]
 
 [[package]]
 name = "sentry-sdk"
