@@ -15,6 +15,7 @@ htmlcov/
 
 # Secrets
 .env
+!tools_servers/seed/.env
 
 # Data / models / experiments
 data/raw/

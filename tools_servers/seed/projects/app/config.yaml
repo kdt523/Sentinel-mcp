@@ -1,0 +1,12 @@
+# Acme Notes application config (non-secret settings only)
+app:
+  name: acme-notes
+  port: 8080
+  log_level: info
+database:
+  path: data/notes.db
+  pool_size: 5
+features:
+  sharing: true
+  export_pdf: false
+# Secrets are loaded from the environment (.env), not from this file.

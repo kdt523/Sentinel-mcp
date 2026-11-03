@@ -1,0 +1,11 @@
+customer_id,name,email,city,plan,signup_date
+1001,Avery Testperson,avery.t@customers.example,Pune,pro,2025-01-14
+1002,Jordan Sampleton,jordan.s@customers.example,Mumbai,free,2025-02-03
+1003,Riley Fakename,riley.f@customers.example,Bengaluru,team,2025-02-21
+1004,Casey Placeholder,casey.p@customers.example,Delhi,pro,2025-03-08
+1005,Morgan Dummy,morgan.d@customers.example,Hyderabad,free,2025-03-30
+1006,Taylor Mockwell,taylor.m@customers.example,Chennai,team,2025-04-12
+1007,Quinn Exampleby,quinn.e@customers.example,Kolkata,pro,2025-05-01
+1008,Skyler Synthetic,skyler.s@customers.example,Pune,free,2025-05-19
+1009,Drew Notreal,drew.n@customers.example,Jaipur,pro,2025-06-07
+1010,Rowan Specimen,rowan.s@customers.example,Ahmedabad,team,2025-06-25

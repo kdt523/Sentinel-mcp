@@ -11,6 +11,7 @@ repos:
       - id: check-added-large-files
         args: ["--maxkb=1024"]
       - id: detect-private-key
+        exclude: ^tools_servers/seed/  # deliberately fake sandbox key
 
   - repo: local
     hooks:
@@ -26,7 +27,7 @@ repos:
         types: [python]
       - id: mypy
         name: mypy
-        entry: uv run mypy gateway tests
+        entry: uv run mypy gateway tools_servers tests
         language: system
         types: [python]
         pass_filenames: false
