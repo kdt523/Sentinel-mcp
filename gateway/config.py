@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     )
 
     # --- storage -------------------------------------------------------------
-    redis_url: str = "redis://localhost:6379/0"
-    database_url: str = "postgresql+psycopg://sentinel:sentinel@localhost:5432/sentinel"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    database_url: str = "postgresql+psycopg://sentinel:sentinel@127.0.0.1:5432/sentinel"
 
     # --- policy & enforcement -----------------------------------------------
     policy_path: Path = Path("policies/default.yaml")
