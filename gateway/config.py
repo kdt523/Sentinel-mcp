@@ -80,6 +80,19 @@ class Settings(BaseSettings):
         description="Tool output text kept per event; full text is hashed (sha256).",
     )
 
+    decision_timeout_ms: int = Field(
+        default=3_000, gt=0, description="Whole-pipeline budget; exceeded -> per-tool fail mode."
+    )
+
+    # --- human approvals (REQUIRE_APPROVAL) -------------------------------------
+    # The agent's call is held open while a human decides. Default 50 s: the mcp v2 Python
+    # client (and many others) do NOT extend a request's timeout on progress notifications,
+    # and 60 s is a common client default. Raise it only for clients that reset on progress.
+    # A timeout is always a DENY, whatever the tool's fail mode.
+    approval_timeout_s: float = Field(default=50.0, gt=0, le=3_600)
+    approval_poll_interval_s: float = Field(default=0.5, gt=0, le=10)
+    approval_progress_interval_s: float = Field(default=5.0, gt=0, le=60)
+
     # --- reasoning guard -----------------------------------------------------
     guard_url: str = "http://localhost:8001/v1"
     guard_timeout_ms: int = Field(default=800, gt=0)

@@ -17,7 +17,7 @@ import contextlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from sqlalchemy import insert
@@ -26,7 +26,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from gateway.config import Settings
-from gateway.db.models import DecisionRow, SessionRow
+from gateway.db.models import ApprovalRow, DecisionRow, SessionRow
 from gateway.detectors import redact_deep, redact_secrets
 from gateway.models import Action, Decision, Event
 
@@ -34,6 +34,8 @@ log = structlog.get_logger("sentinel.recorder")
 PREVIEW_CHARS = 500
 RETRY_DELAY_S = 0.5
 _DROP_LOG_EVERY = 100
+# (kind, row, raw-capture payload or None)
+_Item = tuple[Literal["decision", "approval"], dict[str, Any], dict[str, Any] | None]
 
 
 def decision_row(event: Event, decision: Decision, *, enforced: bool) -> dict[str, Any]:
@@ -91,9 +93,7 @@ class DecisionRecorder:
         capture_dir: Path | None = None,
     ) -> None:
         self._engine = engine
-        self._queue: asyncio.Queue[tuple[dict[str, Any], dict[str, Any] | None]] = asyncio.Queue(
-            maxsize=queue_size
-        )
+        self._queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=queue_size)
         self._batch_size = batch_size
         self._capture_dir = capture_dir
         self._worker: asyncio.Task[None] | None = None
@@ -171,8 +171,16 @@ class DecisionRecorder:
                 "decision": decision.model_dump(mode="json"),
                 "enforced": enforced,
             }
+        return self._put(("decision", decision_row(event, decision, enforced=enforced), raw))
+
+    def submit_approval(self, row: dict[str, Any]) -> bool:
+        """Queue an approval record (upserted by approval_id). Never blocks."""
+        self.submitted += 1
+        return self._put(("approval", row, None))
+
+    def _put(self, item: _Item) -> bool:
         try:
-            self._queue.put_nowait((decision_row(event, decision, enforced=enforced), raw))
+            self._queue.put_nowait(item)
             return True
         except asyncio.QueueFull:
             self.dropped += 1
@@ -195,13 +203,16 @@ class DecisionRecorder:
                 for _ in batch:
                     self._queue.task_done()
 
-    async def _write(self, batch: list[tuple[dict[str, Any], dict[str, Any] | None]]) -> None:
-        rows = [row for row, _ in batch]
-        if not await self._try_insert(rows, attempts=2) and len(rows) > 1:
+    async def _write(self, batch: list[_Item]) -> None:
+        rows = [row for kind, row, _ in batch if kind == "decision"]
+        if rows and not await self._try_insert(rows, attempts=2) and len(rows) > 1:
             # Isolate bad rows (e.g. duplicate event_id) so one row cannot sink a batch.
             for row in rows:
                 await self._try_insert([row], attempts=1)
-        raws = [raw for _, raw in batch if raw is not None]
+        for kind, row, _ in batch:  # in queue order, so a resolution lands after its request
+            if kind == "approval":
+                await self._try_upsert_approval(row)
+        raws = [raw for _, _, raw in batch if raw is not None]
         if raws and self._capture_dir is not None:
             try:
                 await asyncio.to_thread(self._append_capture, raws)
@@ -256,6 +267,28 @@ class DecisionRecorder:
                     },
                 )
                 await conn.execute(stmt)
+
+    async def _try_upsert_approval(self, row: dict[str, Any]) -> None:
+        ins = pg_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
+        stmt = ins(ApprovalRow).values(**row)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[ApprovalRow.approval_id],
+            set_={k: stmt.excluded[k] for k in ("status", "resolved_at", "resolved_by", "note")},
+        )
+        for attempt in (1, 2):
+            try:
+                async with self._engine.begin() as conn:
+                    await conn.execute(stmt)
+            except Exception as exc:  # noqa: BLE001 - logging must never crash the gateway
+                if attempt == 1:
+                    await asyncio.sleep(RETRY_DELAY_S)
+                    continue
+                self.failed += 1
+                log.error("approval_log_write_failed", approval_id=row.get("approval_id"),
+                          error=f"{type(exc).__name__}: {exc}"[:300])  # fmt: skip
+                return
+            self.written += 1
+            return
 
     def _append_capture(self, raws: list[dict[str, Any]]) -> None:
         assert self._capture_dir is not None

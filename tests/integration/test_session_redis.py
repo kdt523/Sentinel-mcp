@@ -79,3 +79,20 @@ async def test_unreachable_redis_fails_fast() -> None:
         await SessionTracker(client).is_terminated("x")
     await client.aclose()
     assert time.perf_counter() - t0 < 5.0
+
+
+async def test_approval_transitions_on_real_redis(redis: Redis) -> None:
+    from gateway.approvals import ApprovalStore
+    from gateway.models import ApprovalStatus
+
+    store = ApprovalStore(redis, ttl_s=120)
+    ev = _req(f"itest-{uuid.uuid4().hex}", "x")
+    a = await store.create(ev, _dec(0.5), preview="{}")
+    try:
+        assert (await store.transition(a.approval_id, ApprovalStatus.DENIED, by="kd")).ok
+        late = await store.transition(a.approval_id, ApprovalStatus.EXPIRED)
+        assert not late.ok and late.status is ApprovalStatus.DENIED
+        assert a.approval_id not in {p.approval_id for p in await store.list_pending()}
+        assert 0 < await redis.ttl(f"sentinel:approval:{a.approval_id}") <= 120
+    finally:
+        await redis.delete(f"sentinel:approval:{a.approval_id}")

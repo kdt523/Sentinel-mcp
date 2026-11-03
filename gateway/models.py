@@ -36,6 +36,14 @@ class EventKind(StrEnum):
     TOOL_DESCRIPTION = "tool_description"  # a tool's description from tools/list (output only)
 
 
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"  # nobody decided within the timeout -> treated as denied
+    CANCELLED = "cancelled"  # the agent went away while waiting
+
+
 class Tier(StrEnum):
     POLICY = "policy"
     FAST = "fast"
