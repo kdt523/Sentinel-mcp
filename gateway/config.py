@@ -43,6 +43,12 @@ class Settings(BaseSettings):
         description="Applied when deciding errors/times out and the tool has no own fail_mode.",
     )
 
+    output_max_chars: int = Field(
+        default=16_000,
+        ge=256,
+        description="Tool output text kept per event; full text is hashed (sha256).",
+    )
+
     # --- reasoning guard -----------------------------------------------------
     guard_url: str = "http://localhost:8001/v1"
     guard_timeout_ms: int = Field(default=800, gt=0)

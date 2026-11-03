@@ -22,6 +22,12 @@ def test_safe_defaults() -> None:
     assert s.default_fail_mode == "closed"
     assert s.admin_api_key is None
     assert s.guard_timeout_ms == 800
+    assert s.output_max_chars == 16_000
+
+
+def test_output_max_chars_lower_bound() -> None:
+    with pytest.raises(ValidationError):
+        Settings(output_max_chars=10)
 
 
 def test_env_prefix_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
