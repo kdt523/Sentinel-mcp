@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     # --- policy & enforcement -----------------------------------------------
     policy_path: Path = Path("policies/default.yaml")
     servers_path: Path = Path("config/servers.yaml")
+    # Host headers accepted on the agent-facing MCP endpoint (DNS-rebinding protection).
+    mcp_allowed_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1:*", "localhost:*"])
     # Separator between server namespace and tool name in names SHOWN TO AGENTS. Internally
     # tools are always "<server>.<tool>". Some LLM APIs reject "." in function names; use
     # "__" for those clients.

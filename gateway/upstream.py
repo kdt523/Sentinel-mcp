@@ -144,6 +144,10 @@ class UpstreamManager:
             **kw,
         )
 
+    def set_observer(self, observer: ToolsObserver | None) -> None:
+        """Set the tools/list observer (the proxy registers itself after construction)."""
+        self._observer = observer
+
     @property
     def servers(self) -> list[str]:
         return list(self._up)
@@ -170,7 +174,8 @@ class UpstreamManager:
             log.info("upstream_connected", server=name)
 
     async def stop(self) -> None:
-        for name, up in self._up.items():
+        # LIFO: each connection's anyio cancel scopes nest inside the ones opened before it.
+        for name, up in reversed(self._up.items()):
             try:
                 await up.stack.aclose()
             except Exception as exc:  # noqa: BLE001

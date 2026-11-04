@@ -121,8 +121,15 @@ class Enforcer:
         self.progress_interval_s = progress_interval_s
 
     async def enforce(
-        self, event: Event, decision: Decision, *, progress: ProgressFn | None = None
+        self,
+        event: Event,
+        decision: Decision,
+        *,
+        progress: ProgressFn | None = None,
+        full_output: str | None = None,
     ) -> EnforcementResult:
+        """``full_output``: the untruncated output text (events store a truncated copy);
+        SANITIZE rewrites and returns the full text."""
         action = decision.action
         if self.shadow_mode:
             if action is not Action.ALLOW:
@@ -139,7 +146,7 @@ class Enforcer:
             return EnforcementResult(forward=True, enforced=True, output=event.output)
         if action is Action.SANITIZE:
             if event.direction is Direction.OUTPUT and event.output is not None:
-                res = sanitize(event.output)
+                res = sanitize(full_output if full_output is not None else event.output)
                 return EnforcementResult(forward=True, enforced=True, output=res.text,
                                          sanitized=tuple(res.removed))  # fmt: skip
             log.warning("sanitize_on_request_blocked", tool=event.qualified_tool)

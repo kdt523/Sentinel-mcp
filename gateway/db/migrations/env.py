@@ -32,7 +32,14 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     section = config.get_section(config.config_ini_section) or {}
     section["sqlalchemy.url"] = _url()
-    engine = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    url = section["sqlalchemy.url"]
+    # Never hang on an unreachable database: fail fast with a clear connection error.
+    connect_args = (
+        {"connect_timeout": Settings().db_connect_timeout_s} if url.startswith("postgresql") else {}
+    )
+    engine = engine_from_config(
+        section, prefix="sqlalchemy.", poolclass=pool.NullPool, connect_args=connect_args
+    )
     with engine.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata,
                           render_as_batch=True, compare_type=True)  # fmt: skip
