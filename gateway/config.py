@@ -65,6 +65,11 @@ class Settings(BaseSettings):
 
     # --- policy & enforcement -----------------------------------------------
     policy_path: Path = Path("policies/default.yaml")
+    servers_path: Path = Path("config/servers.yaml")
+    # Separator between server namespace and tool name in names SHOWN TO AGENTS. Internally
+    # tools are always "<server>.<tool>". Some LLM APIs reject "." in function names; use
+    # "__" for those clients.
+    tool_name_separator: str = Field(default=".", pattern=r"^[._-]{1,2}$")
     shadow_mode: bool = Field(
         default=True,
         description="Decide and log but never enforce. Safe default for rollout.",
