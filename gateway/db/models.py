@@ -22,6 +22,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Text,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -83,6 +84,7 @@ class DecisionRow(Base):
     tier: Mapped[str] = mapped_column(String(16))
     rule_id: Mapped[str | None] = mapped_column(String(80))
     cached: Mapped[bool] = mapped_column(Boolean, default=False)
+    escalated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     latency_ms: Mapped[float] = mapped_column(Float)
     model_version: Mapped[str] = mapped_column(String(128))
     enforced: Mapped[bool] = mapped_column(Boolean)  # False in shadow mode

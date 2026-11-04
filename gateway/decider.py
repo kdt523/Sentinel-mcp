@@ -86,10 +86,11 @@ class PipelineDecider:
             if self.guard is not None:
                 verdict = await self.guard.decide(event, ctx)
                 if verdict is not None:
-                    return verdict.model_copy(update={"rule_id": match.rule_id})
+                    return verdict.model_copy(update={"rule_id": match.rule_id, "escalated": True})
             return match.decision.model_copy(
                 update={
                     "tier": Tier.FALLBACK,
+                    "escalated": True,
                     "reason": f"{match.decision.reason} (escalated; no guard verdict)"[:500],
                 }
             )

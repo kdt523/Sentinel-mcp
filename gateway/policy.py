@@ -494,7 +494,7 @@ async def dry_run(engine: PolicyEngine, scenario: Path) -> list[dict[str, Any]]:
                 "action": decision.action.value if opinion else "-",
                 "rule": decision.rule_id,
                 "tier": decision.tier.value,
-                "escalate": decision.tier is Tier.FALLBACK,
+                "escalate": decision.escalated,
                 "risk": decision.risk, "reason": decision.reason if opinion else "",
             })  # fmt: skip
     finally:

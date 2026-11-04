@@ -65,6 +65,7 @@ def decision_row(event: Event, decision: Decision, *, enforced: bool) -> dict[st
         "tier": decision.tier.value,
         "rule_id": decision.rule_id,
         "cached": decision.cached,
+        "escalated": decision.escalated,
         "latency_ms": decision.latency_ms,
         "model_version": decision.model_version,
         "enforced": enforced,

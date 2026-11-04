@@ -52,6 +52,7 @@ async def test_no_opinion_is_default_tier_allow(
     )
     assert d.action is Action.ALLOW and d.risk == 0.0
     assert d.tier is Tier.DEFAULT and d.rule_id is None
+    assert d.escalated is False
     assert d.model_version == policy.model_version
     assert d.latency_ms > 0
 
@@ -71,6 +72,7 @@ async def test_escalation_without_guard_falls_back(
     assert d.action is Action.REQUIRE_APPROVAL
     assert d.tier is Tier.FALLBACK and d.rule_id == "python3-escalate"
     assert "escalated" in d.reason
+    assert d.escalated is True
 
 
 async def test_escalation_goes_to_guard(tracker: SessionTracker, policy: PolicyEngine) -> None:
@@ -83,6 +85,7 @@ async def test_escalation_goes_to_guard(tracker: SessionTracker, policy: PolicyE
     assert len(guard.calls) == 1
     assert d.action is Action.BLOCK and d.tier is Tier.GUARD
     assert d.rule_id == "python3-escalate"  # provenance of the escalation is kept
+    assert d.escalated is True
 
 
 async def test_guard_abstaining_falls_back(tracker: SessionTracker, policy: PolicyEngine) -> None:

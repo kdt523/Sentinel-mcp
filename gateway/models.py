@@ -183,5 +183,8 @@ class Decision(_Frozen):
     tier: Tier  # tier that originally produced the verdict (kept when served from cache)
     rule_id: str | None = Field(default=None, max_length=80)  # matched policy rule, if any
     cached: bool = False
+    # True when a policy rule escalated this event to the reasoning guard (whether the guard
+    # answered or the rule's fallback was applied). Phase 5 routes these to the guard.
+    escalated: bool = False
     latency_ms: float = Field(default=0.0, ge=0)
     model_version: str = Field(min_length=1)
