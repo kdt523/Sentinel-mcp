@@ -29,6 +29,10 @@ class Settings(BaseSettings):
         frozen=True,
     )
 
+    # --- HTTP server ---------------------------------------------------------
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, ge=1, le=65535)
+
     # --- storage -------------------------------------------------------------
     redis_url: str = "redis://127.0.0.1:6379/0"
     database_url: str = "postgresql+psycopg://sentinel:sentinel@127.0.0.1:5432/sentinel"
