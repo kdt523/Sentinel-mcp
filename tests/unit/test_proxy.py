@@ -52,6 +52,7 @@ class Stack:
     recorder: DecisionRecorder
     engine: AsyncEngine
     tracker: SessionTracker
+    upstreams: UpstreamManager
 
     @asynccontextmanager
     async def client(self, **kw: Any) -> AsyncIterator[Client]:
@@ -103,7 +104,7 @@ async def gateway(tmp_path: Path, *, shadow: bool = False, weather_mode: str = "
     try:
         async with inner.router.lifespan_context(inner):
             with anyio.fail_after(60):
-                yield Stack(app, store, recorder, engine, tracker)
+                yield Stack(app, store, recorder, engine, tracker, upstreams)
     finally:
         await upstreams.stop()
         await recorder.stop()
@@ -250,3 +251,42 @@ async def test_every_logged_decision_has_required_fields(tmp_path: Path) -> None
         for field in ("session_id", "event_id", "direction", "qualified_tool", "tier", "action",
                       "risk", "reason", "latency_ms", "model_version"):  # fmt: skip
             assert getattr(r, field) is not None, field
+
+
+# --- L8: rug-pull seen only through an SDK-silent list during a call ----------------------
+
+
+def _force_silent_relist(gw: Stack, server: str) -> None:
+    """Test-only: drop the upstream client's cached output schemas (private SDK attribute)
+    so its next call_tool lists tools silently, as it does for an uncached tool."""
+    client = gw.upstreams._up[server].client
+    assert client is not None
+    client.session._tool_output_schemas.clear()
+
+
+async def test_rugpull_mid_call_blocks_output_and_revokes(tmp_path: Path) -> None:
+    async with gateway(tmp_path) as gw:
+        async with gw.client() as c:
+            listed = {t.name for t in (await c.list_tools()).tools}  # clean description seen
+            _force_silent_relist(gw, "weather")
+            res = await c.call_tool("weather.get_forecast", {"city": "Pune"})  # poisoned mid-call
+            again = await c.call_tool("weather.get_forecast", {"city": "Pune"})
+        rows = await gw.rows()
+    assert "weather.get_forecast" in listed
+    assert res.is_error and "changed during this call" in text(res)
+    assert "Day 1" not in text(res)  # the upstream result never reaches the agent
+    assert again.is_error and "revoked" in text(again)
+    row = next(r for r in rows if r.rule_id == "builtin:description-changed-mid-call")
+    assert (row.direction, row.action, row.enforced) == ("output", "BLOCK", True)
+
+
+async def test_rugpull_mid_call_shadow_mode_only_logs(tmp_path: Path) -> None:
+    async with gateway(tmp_path, shadow=True) as gw:
+        async with gw.client() as c:
+            await c.list_tools()
+            _force_silent_relist(gw, "weather")
+            res = await c.call_tool("weather.get_forecast", {"city": "Pune"})
+        rows = await gw.rows()
+    assert not res.is_error and "Day 1" in text(res)
+    row = next(r for r in rows if r.rule_id == "builtin:description-changed-mid-call")
+    assert row.enforced is False

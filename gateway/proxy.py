@@ -36,8 +36,8 @@ from starlette.types import ASGIApp
 from gateway.config import FailMode, Settings
 from gateway.decider import PipelineDecider
 from gateway.detectors import iter_strings
-from gateway.enforcer import EnforcementResult, Enforcer, decide_with_fail_mode
-from gateway.models import Action, Decision, Direction, Event, EventKind, sha256_text
+from gateway.enforcer import EnforcementResult, Enforcer, ProgressFn, decide_with_fail_mode
+from gateway.models import Action, Decision, Direction, Event, EventKind, Tier, sha256_text
 from gateway.policy import PolicyEngine
 from gateway.recorder import DecisionRecorder
 from gateway.sanitizer import sanitize
@@ -54,6 +54,10 @@ log = structlog.get_logger("sentinel.proxy")
 _HIDDEN = object()
 # Effective descriptions for the explicit tools/list currently being served (per task).
 _LIST_VIEW: ContextVar[dict[str, Any] | None] = ContextVar("sentinel_list_view", default=None)
+# Tools whose description changed while the current tools/call was in flight (SDK-silent
+# lists happen inside the upstream call). Non-empty -> the call's output is blocked.
+_CALL_CHANGES: ContextVar[list[str] | None] = ContextVar("sentinel_call_changes", default=None)
+RULE_CHANGED_MID_CALL = "builtin:description-changed-mid-call"
 
 
 def flatten_content(result: CallToolResult) -> str:
@@ -198,6 +202,9 @@ class GatewayProxy:
             if obs.changed:
                 log.warning("tool_description_changed", session_id=session_id, tool=qualified,
                             action=decision.action.value)  # fmt: skip
+                in_flight = _CALL_CHANGES.get()
+                if in_flight is not None:
+                    in_flight.append(qualified)
             if view is not None:
                 view[qualified] = result.output if result.forward else _HIDDEN
 
@@ -260,6 +267,8 @@ class GatewayProxy:
 
         # 2. upstream
         t0 = time.perf_counter()
+        changed_mid_call: list[str] = []
+        changes_token = _CALL_CHANGES.set(changed_mid_call)
         try:
             upstream = await self.upstreams.call_tool(server, tool, args, session_id)
         except (UpstreamUnavailableError, TimeoutError) as exc:
@@ -269,6 +278,8 @@ class GatewayProxy:
             log.error("upstream_call_error", server=server, tool=tool,
                       error=f"{type(exc).__name__}: {exc}"[:300])  # fmt: skip
             return _error(f"Upstream tool {server}.{tool} failed ({type(exc).__name__}).")
+        finally:
+            _CALL_CHANGES.reset(changes_token)
         upstream_ms = (time.perf_counter() - t0) * 1000
 
         # 3. output
@@ -277,6 +288,50 @@ class GatewayProxy:
             session_id=session_id, server=server, tool=tool, full_text=full_text,
             max_chars=self.settings.output_max_chars, upstream_ms=upstream_ms,
         )  # fmt: skip
+        if changed_mid_call:
+            blocked = await self._block_rugpull_mid_call(
+                output, request, changed_mid_call, full_text
+            )
+            if blocked is not None:
+                return blocked
+        return await self._finish_output(output, request, upstream, full_text, progress)
+
+    async def _block_rugpull_mid_call(
+        self, output: Event, request: Event, changed: list[str], full_text: str
+    ) -> CallToolResult | None:
+        """A tool description changed via an SDK-silent list while this call ran: the
+        upstream is no longer trusted, so its result must never reach the agent."""
+        tools = sorted(set(changed))
+        decision = Decision(
+            action=Action.BLOCK,
+            risk=0.95,
+            attack_family="tool_poisoning",
+            reason=f"Tool description(s) changed during this call ({', '.join(tools)}); "
+            "output withheld and tool(s) revoked.",
+            tier=Tier.POLICY,
+            rule_id=RULE_CHANGED_MID_CALL,
+            model_version=self.decider.model_version,
+        )
+        enforced = not self.enforcer.shadow_mode
+        if enforced:
+            for qualified in tools:  # revoke regardless of the per-tool description rule
+                await self.tracker.revoke_tool(output.session_id, qualified)
+        log.warning("rugpull_detected_mid_call", session_id=output.session_id, tools=tools,
+                    enforced=enforced)  # fmt: skip
+        result = EnforcementResult(forward=not enforced, enforced=enforced, output=output.output)
+        await self._record(output, decision, result, request=request, raw_output=full_text)
+        if enforced:
+            return _error(f"SentinelMCP blocked this call: {decision.reason}")
+        return None  # shadow mode: logged; continue through the normal output path
+
+    async def _finish_output(
+        self,
+        output: Event,
+        request: Event,
+        upstream: CallToolResult,
+        full_text: str,
+        progress: ProgressFn,
+    ) -> CallToolResult:
         out_decision = await self._decide(output)
         out_verdict = await self.enforcer.enforce(
             output, out_decision, progress=progress, full_output=full_text
