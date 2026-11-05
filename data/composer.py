@@ -46,6 +46,10 @@ class Unit:
     prompt: str
     steps: tuple[StepCall, ...]
     kind: str = "benign"  # "benign" | "attack"
+    family: str | None = None  # attack units: session family
+    goal: str | None = None  # attack units: what the attack tries to achieve
+    # attack units: per-session upstream overrides, e.g. {"weather": {"mode": "rugpull"}}
+    upstreams: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
 
     @property
     def hard_negative(self) -> bool:

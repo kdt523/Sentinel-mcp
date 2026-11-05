@@ -109,10 +109,24 @@ class TemplatesFile(BaseModel):
 
 
 @dataclass(frozen=True)
+class AttackMark:
+    """Labelling facts for a malicious event produced by a step (data/labeling.py)."""
+
+    event: str  # "request" | "output" | "description"
+    family: str
+    leaked_class: str | None = None  # multi_step_exfil: "secret" | "pii"
+    prior_destructive_attempts: int = 0
+    description_changed: bool = False
+    target_tool: str | None = None  # description events: the poisoned tool (<server>.<tool>)
+
+
+@dataclass(frozen=True)
 class StepCall:
-    tool: str
+    tool: str  # "<server>.<tool>"; for op="list_tools" the server whose tools are listed
     args: dict[str, Any]
     hard_negative: bool
+    op: str = "call"  # "call" | "list_tools"
+    attack: AttackMark | None = None
 
 
 @dataclass(frozen=True)
