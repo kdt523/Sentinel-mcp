@@ -42,15 +42,26 @@ uv run --extra agents python -m agents.measure_tool_calling --tries 20 \
   --set filesystem,sql_db,email_send,http_fetch,shell --set all
 ```
 
-### `qwen2.5:7b`
+### `qwen2.5:7b` (measured 2026-11-05)
 
-| Servers offered | Tools | Correct tool call (n) | Rate |
-|---|---|---|---|
-| filesystem, sql_db, email_send, http_fetch, shell | 8 | not yet measured | - |
-| all (incl. poisoned `weather`, `notes`) | 12 | not yet measured | - |
+| Servers offered | Tools | Correct tool call (n) | Rate | Avg s/try (CPU) |
+|---|---|---|---|---|
+| filesystem, sql_db, email_send, http_fetch, shell | 8 | 20/20 (n=20) | 100% | 7.2 |
+| all (incl. poisoned `weather`, `notes`) | 12 | 20/20 (n=20) | 100% | 5.8 |
 
-To fill in: `AGENT_LLM_MODEL=qwen2.5:7b` and the same command with
-`--set filesystem,sql_db,email_send,http_fetch,shell --set all`.
+For comparison, `qwen2.5:3b` averaged about 0.4–1.0 s per try, so the 7B model is roughly
+6–15x slower on a laptop CPU. That matters when generating many sessions in Phase 2.
+
+Scope of this result: one single-turn task with one expected tool. It shows the 7B model
+keeps calling tools with all 12 offered; it does not yet show it picks the *right* tool
+across varied tasks. Phase 2 must measure that on its actual task mix.
+
+Reproduce:
+
+```
+AGENT_LLM_MODEL=qwen2.5:7b uv run --extra agents python -m agents.measure_tool_calling \
+  --tries 20 --set filesystem,sql_db,email_send,http_fetch,shell --set all
+```
 
 ## Phase 1 done-check
 
