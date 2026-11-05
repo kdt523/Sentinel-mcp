@@ -27,7 +27,7 @@ repos:
         types: [python]
       - id: mypy
         name: mypy
-        entry: uv run mypy gateway tools_servers agents tests
+        entry: uv run mypy gateway tools_servers agents data tests
         language: system
         types: [python]
         pass_filenames: false

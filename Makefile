@@ -35,7 +35,7 @@ attacks: ## Attack regression suite
 lint: ## ruff + format check + mypy
 	$(RUN) ruff check .
 	$(RUN) ruff format --check .
-	$(RUN) mypy gateway tools_servers agents tests
+	$(RUN) mypy gateway tools_servers agents data tests
 
 fmt: ## Auto-format and fix lint
 	$(RUN) ruff format .
