@@ -177,6 +177,15 @@ def benign_counts_for_ratio(attack_sessions: dict[Split, int],
     return {sp: round(n * benign_share / (1 - benign_share)) for sp, n in attack_sessions.items()}
 
 
+def resolve_unit(u: Unit, split: Split) -> Unit:
+    """Bind generated-content refs (e.g. benign decoy pages) to items of ``split``."""
+    if "<<" not in u.prompt and not any("<<" in str(st.args) for st in u.steps):
+        return u
+    from data.attacks.templates import resolve_content  # local: attacks imports composer
+
+    return resolve_content(u, split)
+
+
 def compose_benign(units: Sequence[Unit], splits: dict[str, Split], *, n: int = 0, seed: int,
                    n_per_split: dict[Split, int] | None = None,
                    hard_negative_share: float | None = None) -> list[Composite]:  # fmt: skip
@@ -193,7 +202,7 @@ def compose_benign(units: Sequence[Unit], splits: dict[str, Split], *, n: int = 
     counts = n_per_split or {sp: round(n * r) for sp, r in SPLIT_RATIOS.items()}
     out: list[Composite] = []
     for sp in SPLIT_RATIOS:
-        pool = sorted(by_split[sp], key=lambda u: u.seed_id)
+        pool = sorted((resolve_unit(u, sp) for u in by_split[sp]), key=lambda u: u.seed_id)
         hard = [u for u in pool if u.hard_negative]
         easy = [u for u in pool if not u.hard_negative]
         rng.shuffle(hard)

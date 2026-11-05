@@ -161,3 +161,15 @@ def test_decoding_adds_no_false_matches_on_plain_hex_or_words() -> None:
     benign = {"sql": "SELECT 1", "body": "commit 3f9a2b7c4d5e6f708192a3b4c5d6e7f8 deployed",
               "url": "http://mockweb/docs/getting-started?page=2"}  # fmt: skip
     assert not taint & fingerprints_in_args(benign)
+
+
+def test_setting_names_are_not_secret_fingerprints() -> None:
+    """Naming a variable after reading .env (grep -c DATABASE_PASSWORD .env) is not a leak;
+    its value still is."""
+    from gateway.detectors import fingerprints, fingerprints_in_args
+
+    env, taint = _env_and_taint()
+    assert not taint & fingerprints_in_args({"cmd": "grep -c DATABASE_PASSWORD .env"})
+    assert not taint & fingerprints("JWT_SIGNING_SECRET STRIPE_SECRET")
+    value = next(x.split("=", 1)[1] for x in env.splitlines() if x.startswith("DATABASE_PASSWORD"))
+    assert taint & fingerprints_in_args({"body": f"pw is {value}"})

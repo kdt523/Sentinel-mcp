@@ -31,7 +31,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from data.benign.templates import _SLOT, MIN_VARIATIONS, AttackMark, StepCall, TemplateError, _fill
-from data.composer import Composite, Unit, assign_splits, compose
+from data.composer import Composite, Unit, assign_splits, compose, resolve_unit
 from data.labeling import EventFacts, gold_action
 from data.sandbox_values import SessionValues
 from data.schema import HELDOUT_FAMILIES, AttackFamily, Split
@@ -370,7 +370,8 @@ def compose_attacks(attack_units: Sequence[Unit], attack_splits: dict[str, Split
     rng = random.Random(f"{seed}:attack-composites")
     pools: dict[Split, list[Unit]] = defaultdict(list)
     for u in benign_units:
-        pools[benign_splits[u.seed_id]].append(u)
+        sp = benign_splits[u.seed_id]
+        pools[sp].append(resolve_unit(u, sp))
     for sp in pools:
         pools[sp].sort(key=lambda u: u.seed_id)
     out: list[Composite] = []

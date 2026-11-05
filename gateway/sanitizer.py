@@ -104,13 +104,14 @@ def _encoded_instruction(blob: str, *, depth: int = 0) -> bool:
         return False
     if not all(c.isprintable() or c in _LAYOUT for c in decoded):
         return False
-    if len(_INSTRUCTION_WORDS.findall(decoded)) >= 2:
+    # >= 2 DISTINCT tool verbs (a decoded CSV repeating an "email" column is not an order)
+    if len({w.lower() for w in _INSTRUCTION_WORDS.findall(decoded)}) >= 2:
         return True
     # Readable prose hidden in base64 that points at a URL or credential material, or uses
     # a tool verb: legitimate blobs (images, tokens, ids) do not decode to such sentences.
-    if len(_PROSE_WORD.findall(decoded)) >= 6 and (
-        _INSTRUCTION_WORDS.search(decoded) or _EXFIL_HINT.search(decoded)
-    ):
+    words = _PROSE_WORD.findall(decoded)
+    prose = len(words) >= 6 and decoded.count(",") * 3 < len(words)  # not comma-dense data
+    if prose and (_INSTRUCTION_WORDS.search(decoded) or _EXFIL_HINT.search(decoded)):
         return True
     if depth == 0:
         found = _detect(decoded, depth=1)

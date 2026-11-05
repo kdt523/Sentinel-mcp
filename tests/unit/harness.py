@@ -33,7 +33,9 @@ BASE = "http://127.0.0.1:8000"
 
 
 @asynccontextmanager
-async def gateway_app(tmp_path: Path, **settings_kw: Any) -> AsyncIterator[GatewayApp]:
+async def gateway_app(
+    tmp_path: Path, *, deadline_s: float = 90, **settings_kw: Any
+) -> AsyncIterator[GatewayApp]:
     """Fresh gateway + fresh tool servers (the rug-pull server starts clean every time)."""
     settings = Settings(
         policy_path=REPO / "policies" / "default.yaml",
@@ -58,7 +60,7 @@ async def gateway_app(tmp_path: Path, **settings_kw: Any) -> AsyncIterator[Gatew
     app = create_app(settings, redis=fakeredis.FakeAsyncRedis(),
                      sink=create_sink(f"sqlite:///{db}"), upstream_targets=targets)  # fmt: skip
     async with app.api.router.lifespan_context(app.api):
-        with anyio.fail_after(90):
+        with anyio.fail_after(deadline_s):
             yield app
 
 

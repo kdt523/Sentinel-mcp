@@ -134,8 +134,10 @@ def test_resolve_content_is_deterministic() -> None:
 
 def test_each_session_leaks_its_own_values() -> None:
     a, b = [c for c in COMPOSITES if c.units[c.focal_index].template_id == "ms_key_in_url"][:2]
-    key_a = next(st.args["url"] for st in a.steps if st.tool == "http_fetch.fetch")
-    key_b = next(st.args["url"] for st in b.steps if st.tool == "http_fetch.fetch")
+    key_a = next(st.args["url"] for st in a.units[a.focal_index].steps
+                 if st.tool == "http_fetch.fetch")  # fmt: skip
+    key_b = next(st.args["url"] for st in b.units[b.focal_index].steps
+                 if st.tool == "http_fetch.fetch")  # fmt: skip
     assert "sk-fake-" in key_a and key_a != key_b
 
 
@@ -261,7 +263,7 @@ async def test_every_non_shell_attack_session_runs_in_the_sandbox(tmp_path: Path
 
     units = [u for u in UNITS if not any(st.tool.startswith("shell.") for st in u.steps)]
     failures: list[str] = []
-    async with gateway_app(tmp_path, shadow_mode=True) as app:
+    async with gateway_app(tmp_path, shadow_mode=True, deadline_s=1200) as app:
         for u in units:
             c = bind_values(Composite(u.seed_id, SPLITS[u.seed_id], "attack",
                                       (resolve_content(u, SPLITS[u.seed_id]),), 0,

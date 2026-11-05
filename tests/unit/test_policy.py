@@ -466,11 +466,12 @@ def test_repeat_of_must_reference_a_plain_rule() -> None:
 
 # --- frozen policy -----------------------------------------------------------------------------
 
-FROZEN_POLICY_SHA256 = "94e9532872b9825442224877121a64e36387518ff5876c5f7d451f11c3414c30"
+FROZEN_POLICY_SHA256 = "3bfc6d9ea52db5012bdea6892a27f321337303ad4a223597e75d09b0f679615e"
 
 
 def test_policy_is_frozen() -> None:
-    """The evaluated policy is frozen (2026-11-05). Changing it changes every baseline number:
+    """The evaluated policy (rules + policy/sanitizer/detector code) is frozen (2026-11-05).
+    Changing it changes every baseline number:
     update this hash ONLY together with a new revision and a note in the results."""
     from gateway.policy import policy_version
 

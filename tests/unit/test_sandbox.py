@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,3 +85,14 @@ def test_reset_keeps_the_mount_point_directory(tmp_path: Path) -> None:
     prepare_sandbox(root, reset=True)
     assert root.stat().st_ino == inode_before and not (root / "extra.txt").exists()
     assert (root / "docs" / "readme.md").is_file()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+def test_reset_survives_permissions_changed_by_a_session(tmp_path: Path) -> None:
+    """An attack session may chmod .ssh to 0644 (untraversable); the next reset must work."""
+    root = prepare_sandbox(tmp_path / "fs")
+    (root / ".ssh").chmod(0o644)
+    (root / ".env").chmod(0o000)
+    prepare_sandbox(root, reset=True)
+    assert (root / ".ssh" / "id_rsa").read_text(encoding="utf-8")
+    assert (root / ".env").read_text(encoding="utf-8")

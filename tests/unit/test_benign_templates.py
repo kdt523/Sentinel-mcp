@@ -28,11 +28,23 @@ STEPS = [st for s in SESSIONS for st in s.steps]
 
 
 def test_coverage_targets() -> None:
-    assert len(TEMPLATES) >= 50
+    assert len(TEMPLATES) >= 100  # decided 2026-11-05
     assert all(len([s for s in SESSIONS if s.template_id == t.id]) >= 5 for t in TEMPLATES)
     assert {st.tool.split(".")[0] for st in STEPS} == {
-        "filesystem", "shell", "sql_db", "email_send", "http_fetch",
+        "filesystem", "shell", "sql_db", "email_send", "http_fetch", "weather", "notes",
     }  # fmt: skip
+
+
+def test_at_least_60_distinct_focal_tasks_per_eval_split() -> None:
+    from data.composer import assign_splits, units_from_sessions
+    from data.schema import Split
+
+    units = units_from_sessions(SESSIONS)
+    splits = assign_splits(units, seed=42)
+    for sp in (Split.VAL, Split.TEST_SEEN, Split.TEST_HELDOUT):
+        pool = [u for u in units if splits[u.seed_id] is sp]
+        assert len({u.template_id for u in pool}) >= 60, sp
+        assert len(pool) >= 60, sp
 
 
 def test_hard_negatives_are_at_least_20_percent_of_benign_events() -> None:
@@ -134,8 +146,13 @@ async def test_every_non_shell_benign_session_runs_without_tool_errors(tmp_path:
     from agents.outcomes import classify, result_text
 
     failures: list[str] = []
-    async with gateway_app(tmp_path, shadow_mode=True) as app:
-        for s in [s for s in SESSIONS if not any(st.tool.startswith("shell.") for st in s.steps)]:
+    async with gateway_app(tmp_path, shadow_mode=True, deadline_s=1200) as app:
+        from data.composer import assign_splits, resolve_unit, units_from_sessions
+
+        units = units_from_sessions(SESSIONS)
+        splits = assign_splits(units, seed=42)
+        for s in [resolve_unit(u, splits[u.seed_id]) for u in units
+                  if not any(st.tool.startswith("shell.") for st in u.steps)]:  # fmt: skip
             # Fresh sandbox per session, exactly as dataset generation does.
             prepare_sandbox(tmp_path / "fs", reset=True)
             prepare_database(tmp_path / "db" / "app.db", reset=True)
@@ -143,6 +160,6 @@ async def test_every_non_shell_benign_session_runs_without_tool_errors(tmp_path:
                 for st in s.steps:
                     res = await client.call_tool(st.tool, st.args)
                     if classify(res) == "ERROR":
-                        failures.append(f"{s.session_key} {st.tool} {st.args}: "
+                        failures.append(f"{s.seed_id} {st.tool} {st.args}: "
                                         f"{result_text(res)[:120]}")  # fmt: skip
     assert not failures, "\n".join(failures[:20])

@@ -42,12 +42,30 @@ class Sandbox:
         return rel or "."
 
 
+def _restore_owner_access(path: Path) -> None:
+    """Give the owner rwx on every directory and rw on every file below ``path`` (parents
+    before children, so directories made untraversable can be entered again)."""
+    if path.is_symlink():
+        return  # never follow links out of the sandbox
+    is_dir = path.is_dir()
+    try:
+        path.chmod(path.lstat().st_mode | (0o700 if is_dir else 0o600))
+    except OSError:
+        return
+    if is_dir:
+        for child in path.iterdir():
+            _restore_owner_access(child)
+
+
 def prepare_sandbox(runtime_root: Path, seed_dir: Path = SEED_DIR, *, reset: bool = False) -> Path:
     """Seed ``runtime_root`` from ``seed_dir`` if it is missing or EMPTY (a freshly created
     Docker volume is an existing empty directory). With ``reset``, wipe its contents first
     (the directory itself is kept: it may be a mount point)."""
     runtime_root = runtime_root.resolve()
     if reset and runtime_root.exists():
+        # A session may have changed permissions (e.g. an attack chmod-ing .ssh to 0644
+        # makes it untraversable); restore owner access first so the reset never fails.
+        _restore_owner_access(runtime_root)
         for child in runtime_root.iterdir():
             if child.is_dir() and not child.is_symlink():
                 shutil.rmtree(child)

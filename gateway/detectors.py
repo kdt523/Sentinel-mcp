@@ -206,6 +206,9 @@ def _sensitive_line(line: str) -> bool:
     )
 
 
+_ASSIGNMENT_NAME = re.compile(r"(?m)^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*[=:]")
+
+
 def fingerprints(text: str, *, sensitive_lines_only: bool = False) -> set[str]:
     """Hashes of normalised lines and value-like tokens.
 
@@ -219,7 +222,12 @@ def fingerprints(text: str, *, sensitive_lines_only: bool = False) -> set[str]:
             norm = " ".join(line.split())
             if len(norm) >= FP_MIN_LINE and (not sensitive_lines_only or _sensitive_line(norm)):
                 hashes.add(_h("L", norm))
+        # Store side: setting NAMES (``DATABASE_PASSWORD=...``) are labels, not secrets, so
+        # naming a variable later (e.g. ``grep -c DATABASE_PASSWORD .env``) is not a leak.
+        names = set(_ASSIGNMENT_NAME.findall(variant)) if sensitive_lines_only else set()
         for token in _tokens(variant):
+            if token in names:
+                continue
             hashes.add(_h("T", token.lower() if "@" in token else token))
     return hashes
 

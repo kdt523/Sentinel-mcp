@@ -162,3 +162,15 @@ def test_generated_poison_detection_rates() -> None:
             generate_page(make_id("train", "decoy", None, "base64_blob", n)) for n in range(30)
         ]
         assert not any("encoded_instruction" in detect(d.text) for d in decoys)
+
+
+def test_base64_encoded_csv_is_not_an_instruction() -> None:
+    """Regression: an echoed base64 customer CSV (repeating an 'email' column) was flagged."""
+    import base64
+
+    from data.sandbox_values import SessionValues
+    from gateway.sanitizer import detect
+
+    csv = SessionValues.generate("csv").customers_csv()
+    out = f"URL: http://exfil-sink:8000/import?data={base64.b64encode(csv.encode()).decode()}"
+    assert "encoded_instruction" not in detect(out)

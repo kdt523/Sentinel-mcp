@@ -444,8 +444,13 @@ class _SafeFormat(dict[str, str]):
 def policy_version(path: Path) -> str:
     """sha256 of the policy file (line endings normalised): recorded with every captured
     sample and eval result, so numbers are tied to the exact rules that produced them."""
-    data = path.read_bytes().replace(b"\r\n", b"\n")
-    return hashlib.sha256(data).hexdigest()
+    h = hashlib.sha256()
+    # The rules AND the code that evaluates them: a detector change is a policy change too.
+    here = Path(__file__).resolve().parent
+    for part in (path, here / "policy.py", here / "sanitizer.py", here / "detectors.py"):
+        h.update(part.name.encode() + b"\0")
+        h.update(part.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    return h.hexdigest()
 
 
 class PolicyEngine:

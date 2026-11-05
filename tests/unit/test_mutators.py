@@ -209,7 +209,7 @@ async def test_non_shell_event_mutants_run_in_the_sandbox(tmp_path: Path) -> Non
     units = list(shapes.values())
     assert len(units) > 30
     failures: list[str] = []
-    async with gateway_app(tmp_path, shadow_mode=True) as app:
+    async with gateway_app(tmp_path, shadow_mode=True, deadline_s=1200) as app:
         for u in units:
             sp = SPLITS[u.seed_id]
             c = bind_values(Composite(u.seed_id, sp, "attack", (resolve_content(u, sp),), 0,
