@@ -62,8 +62,9 @@ rules:
     type: deny_args_regex
     match: { tools: ["shell.run"] }
     arg: cmd
+    decode: true   # also base64 / hex / percent-encoded quoted literals (encoded paths)
     patterns:
-      - '(^|[\s/])\.ssh(/|\s|$)'
+      - '(^|[\s/''"])\.ssh(/|\s|$)'
       - '\bid_(rsa|dsa|ecdsa|ed25519)\b'
       - '\.(pem|p12|pfx)\b'
     outcome: { action: BLOCK }

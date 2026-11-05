@@ -155,6 +155,34 @@ def variants(text: str) -> list[str]:
     return _variants(text)
 
 
+# Separate patterns: an outer "..." must not swallow an inner '...' literal.
+_QUOTED = (re.compile(r"'([^'\n]{2,512})'"), re.compile(r'"([^"\n]{2,512})"'))
+
+
+def decoded_literals(text: str) -> list[str]:
+    """``text`` plus decodings of every quoted literal of ANY length (base64, hex, percent).
+
+    For path-like matching (e.g. key-material rules on shell commands): an encoded short
+    path such as base64('.ssh/id_rsa') is below the fingerprint decoder's minimum length.
+    Bounded: at most ``DECODE_MAX_SEGMENTS`` literals of <= 512 chars, one layer each."""
+    out = [text]
+    if len(text) > DECODE_MAX_INPUT:
+        return out
+    literals = [m.group(1) for rx in _QUOTED for m in rx.finditer(text)]
+    for lit in literals[:DECODE_MAX_SEGMENTS]:
+        unq = unquote_plus(lit)
+        if unq != lit:
+            out.append(unq)
+        for dec in (lambda s: b64decode(s + "=" * (-len(s) % 4), validate=True), bytes.fromhex):
+            try:
+                decoded = dec(lit).decode("utf-8")
+            except ValueError:
+                continue
+            if _readable(decoded):
+                out.append(decoded)
+    return out
+
+
 def _qualifies(token: str) -> bool:
     if len(token) < FP_MIN_TOKEN:
         return False

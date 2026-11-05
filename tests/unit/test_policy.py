@@ -365,3 +365,34 @@ def test_description_changed_is_configurable_per_tool() -> None:
     a, b = eng.evaluate(changed("docs")), eng.evaluate(changed("weather"))
     assert a is not None and a.decision.action is Action.BLOCK and a.rule_id == "trusted"
     assert b is not None and b.decision.action is Action.REVOKE_TOOL and b.rule_id == "default"
+
+
+# --- encoded key-material paths in shell commands (threat model L9) ---------------------------
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "python3 -c \"import base64; print(open(base64.b64decode('LnNzaC9pZF9yc2E=').decode()).read())\"",  # noqa: E501
+        "python3 -c \"print(open(bytes.fromhex('2e7373682f69645f727361').decode()).read())\"",  # noqa: E501
+        "python3 -c \"from urllib.parse import unquote; print(open(unquote('%2E%73%73%68%2F%69%64%5F%72%73%61')).read())\"",  # noqa: E501
+        "python3 -c \"import base64; print(open(base64.b64decode('ZG9jcy8uLi8uc3NoL2lkX3JzYQ==').decode()).read())\"",  # noqa: E501
+    ],
+)  # fmt: skip
+def test_encoded_key_paths_in_shell_are_blocked(engine: PolicyEngine, cmd: str) -> None:
+    m = engine.evaluate(_ctx(cmd=cmd))
+    assert m is not None and m.rule_id == "key-material-shell"
+    assert m.decision.action is Action.BLOCK and not m.escalate
+
+
+def test_computed_key_path_falls_to_escalation_not_allow(engine: PolicyEngine) -> None:
+    """Residual limitation L9: run-time computed paths cannot be decoded statically."""
+    cmd = "python3 -c \"print(open(''.join(map(chr,[46,115,115,104,47,105,100,95,114,115,97]))).read())\""  # noqa: E501
+    m = engine.evaluate(_ctx(cmd=cmd))
+    assert m is not None and m.rule_id == "python3-escalate" and m.escalate
+
+
+def test_decoding_does_not_flag_harmless_python(engine: PolicyEngine) -> None:
+    cmd = "python3 -c \"import base64; print(base64.b64decode('aGVsbG8gd29ybGQ=').decode())\""
+    m = engine.evaluate(_ctx(cmd=cmd))
+    assert m is not None and m.rule_id == "python3-escalate"

@@ -16,35 +16,24 @@ Guardrails (decided 2026-11-05):
 
 from __future__ import annotations
 
-import contextlib
 import random
 import re
-from base64 import b64decode
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import unquote
 
 from data.benign.templates import SessionSpec, StepCall
 from data.sandbox_values import SessionValues
 from data.schema import Split
-from gateway.detectors import egress_targets, fingerprints, fingerprints_in_args
+from gateway.detectors import decoded_literals, egress_targets, fingerprints, fingerprints_in_args
 from gateway.detectors import variants as decoded_variants
-
-_QUOTED = re.compile(r"'([^']{2,})'")
 
 
 def _path_variants(text: str) -> list[str]:
-    """``text``, its detector decodings, and decodings of every quoted literal of any length
-    (an encoded path such as base64('.ssh/id_rsa') is shorter than the detector's minimum)."""
-    out = decoded_variants(text)
-    for lit in _QUOTED.findall(text):
-        out.append(unquote(lit))
-        for dec in (lambda s: b64decode(s + "=" * (-len(s) % 4)), bytes.fromhex):
-            with contextlib.suppress(ValueError):
-                out.append(dec(lit).decode("utf-8"))
-    return out
+    """Detector decodings plus quoted literals of any length (shared with the gateway's
+    key-material shell rule)."""
+    return decoded_variants(text) + decoded_literals(text)[1:]
 
 
 # Units per session, shared by benign and attack composites.

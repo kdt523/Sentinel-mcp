@@ -42,6 +42,7 @@ from pydantic import (
 
 from gateway.config import FailMode
 from gateway.detectors import (
+    decoded_literals,
     egress_targets,
     fingerprints_in_args,
     iter_strings,
@@ -170,6 +171,9 @@ class DenyArgsRegexRule(_RuleBase):
     arg: str | None = None  # None = any string anywhere in the arguments
     patterns: list[str] = Field(min_length=1)
     ignore_case: bool = True
+    # Also match decodings of quoted base64 / hex / percent literals (e.g. an encoded path
+    # inside a python3 one-liner). See detectors.decoded_literals.
+    decode: bool = False
     _rx: list[re.Pattern[str]] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
@@ -181,10 +185,13 @@ class DenyArgsRegexRule(_RuleBase):
         for value in values:
             if not isinstance(value, str):
                 continue
-            for rx in self._rx:
-                m = rx.search(value)
-                if m:
-                    return {"match": redact_secrets(m.group(0).strip())[:80]}
+            texts = decoded_literals(value) if self.decode else [value]
+            for text in texts:
+                for rx in self._rx:
+                    m = rx.search(text)
+                    if m:
+                        found = redact_secrets(m.group(0).strip())[:80]
+                        return {"match": found if text is value else f"decoded:{found}"}
         return None
 
 
