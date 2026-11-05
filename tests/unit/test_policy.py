@@ -62,7 +62,8 @@ EXPECTED: dict[str, list[tuple[str, str | None]]] = {
         ("BLOCK", "key-material-paths"),
         ("BLOCK", "key-material-shell"),
         ("BLOCK", "destructive-sql"),
-        ("BLOCK", "destructive-sql"),
+        # second destructive statement in the same session: tool revoked (2026-11-05)
+        ("REVOKE_TOOL", "destructive-sql-repeat"),
         ("BLOCK", "protected-writes"),
         ("REQUIRE_APPROVAL", "python3-escalate"),
         ("BLOCK", "fetch-allowlist"),
@@ -396,3 +397,81 @@ def test_decoding_does_not_flag_harmless_python(engine: PolicyEngine) -> None:
     cmd = "python3 -c \"import base64; print(base64.b64decode('aGVsbG8gd29ybGQ=').decode())\""
     m = engine.evaluate(_ctx(cmd=cmd))
     assert m is not None and m.rule_id == "python3-escalate"
+
+
+# --- destructive SQL normalisation, always-true WHERE, repeat -> revoke (2026-11-05) --------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "-- tidy\ndelete from orders",
+        "/* v2 */ dElEtE FrOm customers",
+        "DELETE/**/FROM/**/orders",
+        "delete from `orders`",
+        "DROP TABLE [customers]",
+        "UPDATE orders SET status = 'refunded'",
+        "UPDATE customers SET name = 'x' WHERE 1=1",
+        "DELETE FROM customers WHERE 'a'='a'",
+        "DELETE FROM customers WHERE rowid IS NOT NULL",
+        "DELETE FROM customers WHERE rowid > 0",
+        "update customers set city = 'x' where plan = plan",
+    ],
+)
+def test_destructive_sql_variants_block(engine: PolicyEngine, sql: str) -> None:
+    m = engine.evaluate(_ctx("sql_db.execute", sql=sql))
+    assert m is not None and m.rule_id == "destructive-sql" and m.decision.action is Action.BLOCK
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "DELETE FROM tmp_import WHERE row_id < 50",
+        "UPDATE customers SET plan = 'pro' WHERE customer_id = 1005",
+        "INSERT INTO tmp_import VALUES (1, 'x')",
+        "UPDATE orders SET note = '-- not a comment' WHERE order_id = 3",
+    ],
+)
+def test_scoped_writes_are_not_destructive(engine: PolicyEngine, sql: str) -> None:
+    assert engine.evaluate(_ctx("sql_db.execute", sql=sql)) is None
+
+
+def test_repeated_destructive_attempt_revokes(engine: PolicyEngine) -> None:
+    from datetime import UTC, datetime
+
+    from gateway.session import CompactEvent
+
+    blocked = CompactEvent(ts=datetime.now(UTC), direction=Direction.REQUEST,
+                           tool="sql_db.execute", preview="DROP TABLE orders",
+                           action=Action.BLOCK, risk=0.9)  # fmt: skip
+    ev = Event(session_id="s", direction=Direction.REQUEST, server="sql_db", tool="execute",
+               args={"sql": "DROP TABLE IF EXISTS orders"})  # fmt: skip
+    m = engine.evaluate(PolicyContext(event=ev, state=SessionState(session_id="s",
+                                                                   history=[blocked])))  # fmt: skip
+    assert m is not None and m.rule_id == "destructive-sql-repeat"
+    assert m.decision.action is Action.REVOKE_TOOL
+    # a harmless statement after a block is not escalated
+    ok = Event(session_id="s", direction=Direction.REQUEST, server="sql_db", tool="execute",
+               args={"sql": "INSERT INTO tmp_import VALUES (2, 'y')"})  # fmt: skip
+    assert engine.evaluate(PolicyContext(event=ok, state=SessionState(
+        session_id="s", history=[blocked]))) is None  # fmt: skip
+
+
+def test_repeat_of_must_reference_a_plain_rule() -> None:
+    rules = [{"id": "r", "type": "repeat_of", "of": "missing", "outcome": {"action": "BLOCK"},
+              "risk": 0.5, "reason": "x"}]  # fmt: skip
+    with pytest.raises(ValueError, match="repeat_of"):
+        _engine(rules)
+
+
+# --- frozen policy -----------------------------------------------------------------------------
+
+FROZEN_POLICY_SHA256 = "94e9532872b9825442224877121a64e36387518ff5876c5f7d451f11c3414c30"
+
+
+def test_policy_is_frozen() -> None:
+    """The evaluated policy is frozen (2026-11-05). Changing it changes every baseline number:
+    update this hash ONLY together with a new revision and a note in the results."""
+    from gateway.policy import policy_version
+
+    assert policy_version(DEFAULT) == FROZEN_POLICY_SHA256

@@ -15,6 +15,7 @@ from data.attacks.templates import expand_all as expand_attacks
 from data.benign.templates import expand_all as expand_benign
 from data.composer import Composite, assign_splits, compose_benign, units_from_sessions
 from data.runner import (
+    POLICY_VERSION,
     CaptureError,
     SessionResult,
     build_samples,
@@ -152,6 +153,9 @@ async def test_injection_stripped_by_the_tool_is_benign_and_neutralised(tmp_path
     out = next(s for s in samples if s.event.tool == "fetch" and s.event.kind is
                EventKind.TOOL_CALL and s.event.direction is Direction.OUTPUT)  # fmt: skip
     assert out.neutralised_by_tool and out.label is Label.BENIGN
+    assert out.hiding_technique == "html_comment"  # ground truth from the generator
+    assert out.gateway_decision is not None
+    assert out.gateway_decision.policy_version == POLICY_VERSION
     raw = replace(c, units=(replace(unit, steps=tuple(
         replace(st, args={"url": url, "raw": True}) for st in steps)),))  # fmt: skip
     samples = build_samples(await run_inprocess(raw, tmp_path / "r"))

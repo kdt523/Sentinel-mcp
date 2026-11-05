@@ -35,7 +35,8 @@ _PSEUDO_TAG_BLOCK = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _FAKE_ROLE_LINE = re.compile(r"(?im)^[ \t]*(?:SYSTEM|ADMIN|DEVELOPER)\s*(?:OVERRIDE)?\s*:.*$")
-_MD_COMMENT = re.compile(r"(?m)^[ \t]*\[//\]:\s*#\s*\(.*?\)[ \t]*$")
+# Markdown "comment" link definitions, also when wrapped in HTML (e.g. <pre>[//]: # (..)</pre>)
+_MD_COMMENT = re.compile(r"\[//\]:\s*#\s*\([^\n]*?\)")
 _ZERO_WIDTH = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 # A clause explicitly ADDRESSED to the model ("Note for the assistant ...:",
 # "Assistant processing this note: ...", "Automated agents reading this: ...") up to the
@@ -47,10 +48,14 @@ _ADDRESSED = re.compile(
     r"(?:\s+(?:reading|processing|summari[sz]ing|handling)\b[^\n:]{0,40})?:)"
     r"[^\n]*(?:\n(?!\s*\n)[^\n]*)*"
 )
+_PROSE_WORD = re.compile(r"[A-Za-z]{2,}")
+_EXFIL_HINT = re.compile(r"https?://|\.env\b|id_rsa|\.ssh\b|api[_ ]?key|password|secret", re.I)
+_LAYOUT = frozenset(chr(c) for c in (9, 10, 13))
 _B64_BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _INSTRUCTION_WORDS = re.compile(
-    r"\b(assistant|ignore|instruction|execute|call|run|send|email|read|delete|drop|reply|"
-    r"forward|upload|post)\b",
+    r"\b(assistant|ignore|instruction|execute|call|calling|run|send|email|read|delete|drop|"
+    r"reply|forward|upload|post|fetch|open|append|appended|include|attach|paste|curl|visit|"
+    r"write|report|load)\b",
     re.IGNORECASE,
 )
 
@@ -90,12 +95,27 @@ def _sub(rx: re.Pattern[str], label: str, text: str, removed: list[str]) -> str:
     return rx.sub(repl, text)
 
 
-def _encoded_instruction(blob: str) -> bool:
+def _encoded_instruction(blob: str, *, depth: int = 0) -> bool:
+    """A base64 blob whose DECODED text is an instruction: either imperative tool words, or
+    any high-confidence detector firing on the decoded text (scanned one level deep)."""
     try:
         decoded = base64.b64decode(blob + "=" * (-len(blob) % 4), validate=True).decode("utf-8")
     except (binascii.Error, UnicodeDecodeError, ValueError):
         return False
-    return decoded.isprintable() and len(_INSTRUCTION_WORDS.findall(decoded)) >= 2
+    if not all(c.isprintable() or c in _LAYOUT for c in decoded):
+        return False
+    if len(_INSTRUCTION_WORDS.findall(decoded)) >= 2:
+        return True
+    # Readable prose hidden in base64 that points at a URL or credential material, or uses
+    # a tool verb: legitimate blobs (images, tokens, ids) do not decode to such sentences.
+    if len(_PROSE_WORD.findall(decoded)) >= 6 and (
+        _INSTRUCTION_WORDS.search(decoded) or _EXFIL_HINT.search(decoded)
+    ):
+        return True
+    if depth == 0:
+        found = _detect(decoded, depth=1)
+        return any(CONFIDENCE[label] == HIGH for label in found)
+    return False
 
 
 def sanitize(text: str) -> SanitizeResult:
@@ -123,6 +143,10 @@ def sanitize(text: str) -> SanitizeResult:
 
 
 def detect(text: str) -> dict[str, str]:
+    return _detect(text, depth=0)
+
+
+def _detect(text: str, *, depth: int) -> dict[str, str]:
     """Detector labels found in ``text`` mapped to their confidence (no rewriting).
 
     Every detector runs independently on the ORIGINAL text, so an instruction addressed to
@@ -136,7 +160,9 @@ def detect(text: str) -> dict[str, str]:
         "fake_role_block": bool(_FAKE_ROLE_BLOCK.search(text) or _FAKE_ROLE_LINE.search(text)),
         "pseudo_tag_block": bool(_PSEUDO_TAG_BLOCK.search(text)),
         "markdown_comment": bool(_MD_COMMENT.search(text)),
-        "encoded_instruction": any(_encoded_instruction(b) for b in _B64_BLOB.findall(text)),
+        "encoded_instruction": any(
+            _encoded_instruction(b, depth=depth) for b in _B64_BLOB.findall(text)
+        ),
         "addressed_instruction": bool(_ADDRESSED.search(_ZERO_WIDTH.sub("", text))),
     }
     return {label: CONFIDENCE[label] for label, hit in checks.items() if hit}

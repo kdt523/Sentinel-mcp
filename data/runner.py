@@ -52,12 +52,15 @@ from data.schema import (
     SessionContext,
 )
 from gateway.models import Action, Decision, Direction, Event, EventKind
+from gateway.policy import policy_version
 from gateway.session import SessionState, _preview
 from tools_servers.content_gen import ZW, ContentIdError, generate_note, generate_page
 from tools_servers.poisoned_desc.server import FORECAST_CLEAN
 
 REPO = Path(__file__).resolve().parents[1]
 CLEAN_DESCRIPTIONS = {"weather.get_forecast": FORECAST_CLEAN}
+POLICY_PATH = REPO / "policies" / "default.yaml"
+POLICY_VERSION = policy_version(POLICY_PATH)  # the stack image is built from the same file
 
 
 class CaptureError(RuntimeError):
@@ -172,7 +175,7 @@ async def capturing_gateway(workdir: Path, weather_mode: str,
     from tools_servers.sql_db.server import build_server as build_sql
 
     settings = Settings(
-        policy_path=REPO / "policies" / "default.yaml",
+        policy_path=POLICY_PATH,
         shadow_mode=True,
         capture_mode=True,
         sandbox_mode=True,  # raw capture is refused outside the sandbox
@@ -445,6 +448,11 @@ def build_samples(result: SessionResult, *, generator: str = "scripted") -> list
                 else:
                     neutralised = True
         malicious = gold is not Action.ALLOW
+        technique = None
+        if (st is not None and ev.kind is EventKind.TOOL_CALL
+                and ev.direction is Direction.OUTPUT):  # fmt: skip
+            item = _content_item(st.args)
+            technique = item.technique if item is not None else None
         payload = EventPayload(
             direction=ev.direction, kind=ev.kind, server=ev.server, tool=ev.tool,
             args=ev.args if ev.direction is Direction.REQUEST else None,
@@ -472,8 +480,9 @@ def build_samples(result: SessionResult, *, generator: str = "scripted") -> list
             hard_negative=bool(st is not None and st.hard_negative and not malicious),
             source=focal.source, generator=generator, template_id=focal.template_id,
             seed_id=focal.parent or focal.seed_id, neutralised_by_tool=neutralised,
+            hiding_technique=technique,
             gateway_decision=GatewayVerdict(action=d.action, tier=d.tier, rule_id=d.rule_id,
-                                            risk=d.risk),
+                                            risk=d.risk, policy_version=POLICY_VERSION),
             post_termination=terminated, split=c.split,
         ))  # fmt: skip
         if gold is Action.TERMINATE_SESSION:
@@ -492,6 +501,7 @@ def _uses_shell(c: Composite) -> bool:
 
 
 async def run_all(composites: Sequence[Composite], out: Path, *, stack: bool = False,
+                  shell_only: bool = False,
                   workroot: Path | None = None) -> dict[str, int]:  # fmt: skip
     """Run every composite (shell ones on the stack when ``stack``) and append its samples
     to ``out`` (JSONL). Sessions whose captured events do not line up with their steps are
@@ -519,7 +529,7 @@ async def run_all(composites: Sequence[Composite], out: Path, *, stack: bool = F
         ):
             stats["attack_sessions_fully_neutralised"] += 1
 
-    local = [c for c in composites if not _uses_shell(c)]
+    local = [] if shell_only else [c for c in composites if not _uses_shell(c)]
     shell = [c for c in composites if _uses_shell(c)]
     with tempfile.TemporaryDirectory(dir=workroot) as tmp, out.open("a", encoding="utf-8") as fh:
         for n, c in enumerate(local):
@@ -571,8 +581,16 @@ def main() -> None:
     ap.add_argument(
         "--stack", action="store_true", help="also run shell sessions on the compose stack (docker)"
     )
+    ap.add_argument("--shell-only", action="store_true", help="only the shell sessions (stack)")
     args = ap.parse_args()
-    stats = asyncio.run(run_all(_composites(args.limit, args.seed), args.out, stack=args.stack))
+    stats = asyncio.run(
+        run_all(
+            _composites(args.limit, args.seed),
+            args.out,
+            stack=args.stack or args.shell_only,
+            shell_only=args.shell_only,
+        )
+    )
     print(json.dumps(stats, indent=2))
 
 

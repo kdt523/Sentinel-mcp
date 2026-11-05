@@ -111,6 +111,7 @@ class GatewayVerdict(_Strict):
     tier: Tier
     rule_id: str | None = None
     risk: float = Field(ge=0.0, le=1.0)
+    policy_version: str | None = None  # sha256 of the policy file the gateway ran
 
 
 class Sample(_Strict):
@@ -138,6 +139,9 @@ class Sample(_Strict):
     seed_id: str  # mutants share their seed's id -> same split
     verified: bool | None = None  # attack sessions: goal achieved with the gateway OFF
     neutralised_by_tool: bool = False  # injection stripped by the tool itself
+    # Output events that returned GENERATED content (poison or decoy): the hiding technique
+    # the generator used (ground truth from tools_servers/content_gen, never parsed).
+    hiding_technique: str | None = None
     gateway_decision: GatewayVerdict | None = None
     # Shadow capture keeps running after a would-be TERMINATE_SESSION; such later events
     # never happen in an enforced deployment and are excluded from every split by default.

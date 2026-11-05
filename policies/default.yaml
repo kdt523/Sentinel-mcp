@@ -5,7 +5,7 @@
 
 schema_version: 1
 name: default
-revision: "2026-11-04.1"
+revision: "2026-11-05.1"   # FROZEN for Phase 2/3 evaluation: hash pinned in tests/unit/test_policy.py
 
 # Per-tool fail mode when deciding errors/times out (first matching glob wins).
 # Unlisted tools use SENTINEL_DEFAULT_FAIL_MODE.
@@ -87,13 +87,28 @@ rules:
     reason: "Writing {path} could alter startup, credentials or security policy."
 
   # --- destructive SQL ---------------------------------------------------------------------
+  # A repeated destructive attempt on the same tool in one session revokes the tool
+  # (LABELING.md: destructive with prior attempts -> REVOKE_TOOL). Must precede its target.
+  - id: destructive-sql-repeat
+    type: repeat_of
+    of: destructive-sql
+    match: { tools: ["sql_db.execute"] }
+    outcome: { action: REVOKE_TOOL }
+    risk: 0.95
+    attack_family: destructive
+    reason: "Repeated destructive SQL ({match}) after {count} stopped attempt(s); tool revoked."
+
   - id: destructive-sql
     type: deny_args_regex
     match: { tools: ["sql_db.execute"] }
     arg: sql
+    normalize: sql   # comments stripped, identifier quotes dropped, lowercased, spaces collapsed
     patterns:
-      - '^\s*(drop|truncate|alter)\b'
-      - '^\s*delete\s+from\s+[\w."]+\s*;?\s*$'   # DELETE without WHERE
+      - '^(drop|truncate|alter) '
+      - '^delete from [\w.]+ ?;?$'                         # DELETE without WHERE
+      - '^update [\w.]+ set (?!.*\bwhere\b).*$'           # UPDATE without WHERE
+      # always-true WHERE: 1, true, N=N, 'x'='x', col=col, rowid > / >= 0, rowid is not null
+      - "^(delete from|update) .*\\bwhere (1|true|(?P<n>\\d+) ?= ?(?P=n)|(?P<s>'[^']*') ?= ?(?P=s)|(?P<c>\\w+) ?= ?(?P=c)|rowid ?>=? ?0|rowid is not null) ?;?$"
     outcome: { action: BLOCK }
     risk: 0.9
     attack_family: destructive

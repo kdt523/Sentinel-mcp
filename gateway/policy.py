@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import fnmatch
+import hashlib
 import json
 import re
 import string
@@ -174,6 +175,9 @@ class DenyArgsRegexRule(_RuleBase):
     # Also match decodings of quoted base64 / hex / percent literals (e.g. an encoded path
     # inside a python3 one-liner). See detectors.decoded_literals.
     decode: bool = False
+    # "sql": match the statement after stripping comments and identifier quoting, lowercased
+    # with whitespace collapsed (see normalize_sql), so comments / odd casing cannot hide it.
+    normalize: Literal["none", "sql"] = "none"
     _rx: list[re.Pattern[str]] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
@@ -186,6 +190,8 @@ class DenyArgsRegexRule(_RuleBase):
             if not isinstance(value, str):
                 continue
             texts = decoded_literals(value) if self.decode else [value]
+            if self.normalize == "sql":
+                texts = [normalize_sql(t) for t in texts]
             for text in texts:
                 for rx in self._rx:
                     m = rx.search(text)
@@ -193,6 +199,71 @@ class DenyArgsRegexRule(_RuleBase):
                         found = redact_secrets(m.group(0).strip())[:80]
                         return {"match": found if text is value else f"decoded:{found}"}
         return None
+
+
+_SQL_IDENT_QUOTES = re.compile(r"[`\"\[\]]")
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Remove -- and /* */ comments OUTSIDE single-quoted string literals."""
+    out: list[str] = []
+    i, n, in_str = 0, len(sql), False
+    while i < n:
+        ch = sql[i]
+        if in_str:
+            out.append(ch)
+            if ch == "'":
+                in_str = False
+            i += 1
+        elif ch == "'":
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end < 0 else end
+            out.append(" ")
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            out.append(" ")
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def normalize_sql(sql: str) -> str:
+    """Comments removed (outside string literals), identifier quoting (`x`, "x", [x])
+    dropped, lowercased, whitespace collapsed."""
+    sql = _strip_sql_comments(sql)
+    sql = _SQL_IDENT_QUOTES.sub("", sql)
+    return " ".join(sql.lower().split())
+
+
+class RepeatOfRule(_RuleBase):
+    """Fires when rule ``of`` matches this event AND an earlier request to the same tool in
+    this session was already stopped (BLOCK / REVOKE_TOOL; in shadow mode the would-be
+    action). Placed before ``of`` so a repeated attempt escalates, e.g. to REVOKE_TOOL."""
+
+    type: Literal["repeat_of"]
+    of: str
+    _target: _RuleBase | None = PrivateAttr(default=None)
+
+    def check(self, ctx: PolicyContext) -> dict[str, str] | None:
+        target = self._target
+        if target is None or not target.applies(ctx.event):
+            return None
+        values = target.check(ctx)
+        if values is None:
+            return None
+        tool = ctx.event.qualified_tool
+        prior = [h for h in ctx.state.history
+                 if h.direction is Direction.REQUEST and h.tool == tool
+                 and h.action in (Action.BLOCK, Action.REVOKE_TOOL)]  # fmt: skip
+        if not prior:
+            return None
+        return {**values, "count": str(len(prior))}
 
 
 class EgressAllowlistRule(_RuleBase):
@@ -315,6 +386,7 @@ Rule = Annotated[
     | EgressAllowlistRule
     | TaintedFlowRule
     | MaxCallsRule
+    | RepeatOfRule
     | SessionRiskRule
     | OutputInjectionRule
     | DescriptionChangedRule,
@@ -340,6 +412,14 @@ class PolicyFile(_Strict):
             if r.id in seen:
                 raise ValueError(f"duplicate rule id: {r.id}")
             seen.add(r.id)
+        by_id = {r.id: r for r in self.rules}
+        for r in self.rules:
+            if isinstance(r, RepeatOfRule):
+                target = by_id.get(r.of)
+                if target is None or isinstance(target, RepeatOfRule):
+                    raise ValueError(f"rule {r.id}: repeat_of needs an existing plain rule, "
+                                     f"got {r.of!r}")  # fmt: skip
+                r._target = target
         return self
 
 
@@ -359,6 +439,13 @@ class PolicyMatch(_Strict):
 class _SafeFormat(dict[str, str]):
     def __missing__(self, key: str) -> str:
         return "?"
+
+
+def policy_version(path: Path) -> str:
+    """sha256 of the policy file (line endings normalised): recorded with every captured
+    sample and eval result, so numbers are tied to the exact rules that produced them."""
+    data = path.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(data).hexdigest()
 
 
 class PolicyEngine:
