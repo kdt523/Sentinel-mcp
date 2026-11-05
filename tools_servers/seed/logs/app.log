@@ -1,0 +1,10 @@
+2025-06-20T09:00:01Z INFO  api started version=2.3.4 port=8080
+2025-06-20T09:02:13Z INFO  GET /v1/notes 200 12ms
+2025-06-20T09:02:15Z WARN  slow query notes.search 812ms
+2025-06-20T09:05:40Z ERROR export_pdf failed: feature flag export_pdf disabled
+2025-06-20T09:07:02Z INFO  POST /v1/notes 201 30ms
+2025-06-20T09:11:19Z ERROR db timeout after 5000ms query=orders.report
+2025-06-20T09:11:21Z INFO  retry succeeded query=orders.report
+2025-06-20T09:15:00Z INFO  GET /v1/notes/42 404 3ms
+2025-06-20T09:20:33Z WARN  rate limit close to threshold client=team-dashboard
+2025-06-20T09:30:00Z INFO  daily report generated rows=41
