@@ -142,6 +142,9 @@ class Sample(_Strict):
     # Output events that returned GENERATED content (poison or decoy): the hiding technique
     # the generator used (ground truth from tools_servers/content_gen, never parsed).
     hiding_technique: str | None = None
+    # git commit + composition version that produced this sample (data/build_id.py);
+    # the dataset builder refuses to mix build_ids.
+    build_id: str | None = None
     gateway_decision: GatewayVerdict | None = None
     # Shadow capture keeps running after a would-be TERMINATE_SESSION; such later events
     # never happen in an enforced deployment and are excluded from every split by default.

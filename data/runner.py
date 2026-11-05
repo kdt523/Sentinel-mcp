@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from data.benign.templates import StepCall
+from data.build_id import current_build_id
 from data.composer import Composite, Unit
 from data.labeling import gold_for_mark
 from data.sandbox_values import SessionValues
@@ -60,6 +61,7 @@ from tools_servers.poisoned_desc.server import FORECAST_CLEAN
 REPO = Path(__file__).resolve().parents[1]
 CLEAN_DESCRIPTIONS = {"weather.get_forecast": FORECAST_CLEAN}
 POLICY_PATH = REPO / "policies" / "default.yaml"
+BUILD_ID = current_build_id()
 POLICY_VERSION = policy_version(POLICY_PATH)  # the stack image is built from the same file
 
 
@@ -470,7 +472,7 @@ def build_samples(result: SessionResult, *, generator: str = "scripted") -> list
             hard_negative=bool(st is not None and st.hard_negative and not malicious),
             source=focal.source, generator=generator, template_id=focal.template_id,
             seed_id=focal.parent or focal.seed_id, neutralised_by_tool=neutralised,
-            hiding_technique=technique,
+            hiding_technique=technique, build_id=BUILD_ID,
             gateway_decision=GatewayVerdict(action=d.action, tier=d.tier, rule_id=d.rule_id,
                                             risk=d.risk, policy_version=POLICY_VERSION),
             post_termination=terminated, split=c.split,

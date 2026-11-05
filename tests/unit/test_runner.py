@@ -189,3 +189,34 @@ async def test_misaligned_capture_is_an_error(tmp_path: Path) -> None:
     other = _attack("ds_drop_table")
     with pytest.raises(CaptureError):
         build_samples(SessionResult(other, result.records))
+
+
+# --- build_id -----------------------------------------------------------------------------------
+
+
+async def test_every_sample_carries_the_build_id(tmp_path: Path) -> None:
+    from data.build_id import current_build_id
+
+    samples = build_samples(await run_inprocess(_attack("ds_drop_table"), tmp_path / "s"))
+    assert {s.build_id for s in samples} == {current_build_id()}
+
+
+def test_build_id_changes_with_composition_and_mixed_ids_are_refused() -> None:
+    import data.build_id as b
+
+    assert b.current_build_id().endswith("+" + b.composition_version())
+    assert b.require_single_build(["abc+123", "abc+123"]) == "abc+123"
+    for bad in (["a+1", "b+2"], ["a+1", None], ["abc-dirty+1"]):
+        with pytest.raises(b.MixedBuildError):
+            b.require_single_build(bad)
+    before = b.composition_version()
+    b.composition_version.cache_clear()
+    path = b.REPO / b.COMPOSITION_FILES[0]
+    original = path.read_bytes()
+    try:
+        path.write_bytes(original + b"\n# probe\n")
+        assert b.composition_version() != before
+    finally:
+        path.write_bytes(original)
+        b.composition_version.cache_clear()
+    assert b.composition_version() == before
