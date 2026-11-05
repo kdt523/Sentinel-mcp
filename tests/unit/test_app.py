@@ -39,9 +39,15 @@ def sink_for(engine: Any) -> Any:
     return create_sink(engine.url.render_as_string(hide_password=False))
 
 
-def _engine(tmp_path: Path) -> Any:
-    """Async reader for the decision-log SQLite file the app writes to."""
-    return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'log.db'}")
+async def _query(tmp_path: Path, stmt: Any) -> Any:
+    """Run one read against the decision-log SQLite file, then dispose the engine (no
+    leaked aiosqlite threads outliving the event loop)."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'log.db'}")
+    try:
+        async with engine.connect() as conn:
+            return (await conn.execute(stmt)).all()
+    finally:
+        await engine.dispose()
 
 
 @asynccontextmanager
@@ -57,12 +63,14 @@ async def running(tmp_path: Path, *, key: str | None = KEY,
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'log.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    sink = sink_for(engine)
+    await engine.dispose()  # schema created; the app writes through its own sync sink
     targets: dict[str, Any] = {
         "filesystem": build_fs(prepare_sandbox(tmp_path / "fs")),
         "email_send": build_email(tmp_path / "outbox.jsonl", ("acme.example",)),
         **(extra or {}),
     }
-    app = create_app(settings, redis=fakeredis.FakeAsyncRedis(), sink=sink_for(engine),
+    app = create_app(settings, redis=fakeredis.FakeAsyncRedis(), sink=sink,
                      upstream_targets=targets)  # fmt: skip
     async with app.api.router.lifespan_context(app.api):
         with anyio.fail_after(60):
@@ -150,8 +158,7 @@ async def test_approve_records_approver_note_and_conflicts(tmp_path: Path) -> No
         bad = await admin.post(f"/approvals/{aid}/approve", headers=AUTH, json={})
         res = await call
         await asyncio.wait_for(app.api.state.admin.recorder._queue.join(), 10)
-        async with _engine(tmp_path).connect() as conn:
-            row = (await conn.execute(select(ApprovalRow))).one()
+        [row] = await _query(tmp_path, select(ApprovalRow))
     assert pending["status"] == "pending" and pending["qualified_tool"] == "email_send.send"
     assert ok.status_code == 200 and ok.json()["status"] == "approved"
     assert ok.json()["resolved_by"] == "kd" and ok.json()["note"] == "known vendor"
@@ -181,10 +188,9 @@ async def test_session_view_is_redacted(tmp_path: Path) -> None:
         async with mcp_client(app) as agent:
             await agent.call_tool("filesystem.read_file", {"path": ".env"})
         await asyncio.wait_for(app.api.state.admin.recorder._queue.join(), 10)
-        async with _engine(tmp_path).connect() as conn:
-            from gateway.db.models import DecisionRow
+        from gateway.db.models import DecisionRow
 
-            sid = (await conn.execute(select(DecisionRow.session_id))).scalars().first()
+        sid = (await _query(tmp_path, select(DecisionRow.session_id)))[0][0]
         view = await admin.get(f"/sessions/{sid}", headers=AUTH)
         missing = await admin.get("/sessions/nope", headers=AUTH)
         noauth = await admin.get(f"/sessions/{sid}")
