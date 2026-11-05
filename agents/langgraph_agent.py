@@ -18,9 +18,12 @@ import argparse
 import asyncio
 import re
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
 from mcp import Client
 from mcp.types import Tool
 from pydantic import Field, SecretStr
@@ -46,6 +49,16 @@ class AgentSettings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("ollama")  # Ollama ignores it; real APIs need one
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_steps: int = Field(default=12, ge=1, le=100)
+    # Comma-separated gateway servers whose tools the AGENT's model is offered (empty = all).
+    # Only filters what the agent sees; the gateway still loads and guards every server.
+    # Small models degrade with many tools (qwen2.5:3b stops calling tools at ~10+).
+    servers: str = ""
+    gateway_tool_separator: str = "."  # must match the gateway's SENTINEL_TOOL_NAME_SEPARATOR
+
+    @property
+    def server_list(self) -> list[str]:
+        return [s.strip() for s in self.servers.split(",") if s.strip()]
+
     request_timeout_s: float = Field(default=120.0, gt=0)
 
 
@@ -94,7 +107,9 @@ def mcp_tools_for_langchain(client: Client, tools: list[Tool], run: AgentRun) ->
     return lc_tools
 
 
-def build_chat_model(settings: AgentSettings) -> Any:
+def build_chat_model(settings: AgentSettings, *, http_async_client: Any = None) -> Any:
+    """Prefer ``chat_model()``: without an explicit client, langchain-openai reuses one
+    process-wide HTTP client, which breaks when a later run uses a new event loop."""
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -103,7 +118,27 @@ def build_chat_model(settings: AgentSettings) -> Any:
         api_key=settings.llm_api_key,
         temperature=settings.temperature,
         timeout=settings.request_timeout_s,
+        http_async_client=http_async_client,
     )
+
+
+@asynccontextmanager
+async def chat_model(
+    settings: AgentSettings, *, transport: httpx.AsyncBaseTransport | None = None
+) -> AsyncIterator[Any]:
+    """Chat model with its OWN HTTP client, created in (and closed with) the current event
+    loop, so several agent runs - even under separate ``asyncio.run`` calls - never share
+    a client bound to a closed loop. ``transport`` is a test hook."""
+    async with httpx.AsyncClient(timeout=settings.request_timeout_s, transport=transport) as hc:
+        yield build_chat_model(settings, http_async_client=hc)
+
+
+def filter_tools(tools: list[Tool], servers: list[str], separator: str = ".") -> list[Tool]:
+    """Keep only tools of the given gateway servers (empty list = keep all)."""
+    if not servers:
+        return tools
+    prefixes = tuple(f"{s}{separator}" for s in servers)
+    return [t for t in tools if t.name.startswith(prefixes)]
 
 
 async def run_task(
@@ -113,12 +148,18 @@ async def run_task(
     model: Any,
     max_steps: int = 12,
     system_prompt: str = SYSTEM_PROMPT,
+    servers: list[str] | None = None,
+    separator: str = ".",
 ) -> AgentRun:
-    """Run one task with ``model`` against the gateway reachable through ``client``."""
+    """Run one task with ``model`` against the gateway reachable through ``client``.
+
+    ``servers`` limits which gateway tools the model is offered (None/empty = all)."""
     from langchain.agents import create_agent
 
     run = AgentRun(task=task, answer="")
-    tools = list((await client.list_tools()).tools)
+    tools = filter_tools(list((await client.list_tools()).tools), servers or [], separator)
+    if not tools:
+        raise ValueError(f"no gateway tools match AGENT_SERVERS={servers}")
     agent = create_agent(model, mcp_tools_for_langchain(client, tools, run),
                          system_prompt=system_prompt)  # fmt: skip
     state = await agent.ainvoke(
@@ -131,9 +172,10 @@ async def run_task(
 
 
 async def _main_async(task: str, settings: AgentSettings) -> AgentRun:
-    async with Client(settings.gateway_url) as client:
-        return await run_task(task, client=client, model=build_chat_model(settings),
-                              max_steps=settings.max_steps)  # fmt: skip
+    async with Client(settings.gateway_url) as client, chat_model(settings) as model:
+        return await run_task(task, client=client, model=model,
+                              max_steps=settings.max_steps, servers=settings.server_list,
+                              separator=settings.gateway_tool_separator)  # fmt: skip
 
 
 def main(argv: list[str] | None = None) -> int:

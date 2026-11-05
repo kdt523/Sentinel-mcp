@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 pytest.importorskip("langchain.agents", reason="install the 'agents' extra")
@@ -84,3 +87,84 @@ def test_agent_settings_default_to_local_ollama(
     assert s.llm_model == "qwen2.5:3b"
     assert s.llm_base_url == "http://127.0.0.1:11434/v1"
     assert "ollama" not in repr(s)  # api key is a secret
+
+
+def test_filter_tools_by_server() -> None:
+    from mcp.types import Tool
+
+    from agents.langgraph_agent import filter_tools
+
+    names = ("filesystem.read_file", "weather.get_forecast", "notes.get_ticket")
+    tools = [Tool(name=n, input_schema={"type": "object"}) for n in names]
+    assert [t.name for t in filter_tools(tools, ["filesystem"])] == ["filesystem.read_file"]
+    assert filter_tools(tools, []) == tools
+    sep = [Tool(name="filesystem__read_file", input_schema={"type": "object"})]
+    assert filter_tools(sep, ["filesystem"], "__") == sep
+
+
+def test_agent_servers_setting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_SERVERS", " filesystem, shell ,")
+    assert AgentSettings().server_list == ["filesystem", "shell"]
+
+
+async def test_filter_only_limits_the_agent_gateway_still_guards_all(tmp_path: Path) -> None:
+    fake = model(call("filesystem__read_file", {"path": "docs/readme.md"}), AIMessage(content="ok"))
+    async with gateway_app(tmp_path) as app, agent_client(app) as client:
+        run = await run_task("x", client=client, model=fake, servers=["filesystem"])
+        listed = {t.name for t in (await client.list_tools()).tools}
+        guarded = await client.call_tool("notes.get_ticket", {"ticket_id": "T-2002"})
+    assert all(n.startswith("filesystem__") for n in fake.__dict__["bound_tool_names"])
+    assert run.calls[0].outcome == "ALLOW"
+    # gateway still serves the servers the agent was not offered (get_forecast is absent only
+    # because the rug-pull server changed it on this second list -> revoked, as designed)
+    assert {"weather.convert_currency", "notes.get_ticket"} <= listed
+    assert "weather.get_forecast" not in listed
+    assert "DELETE FROM customers" not in str(guarded.content)  # ...and still guards them
+
+
+def _fake_openai() -> httpx.MockTransport:
+    """OpenAI-compatible endpoint: first a tool call, then a final answer."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            message: dict[str, Any] = {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "filesystem__read_file",
+                             "arguments": json.dumps({"path": "docs/readme.md"})},
+            }]}  # fmt: skip
+        else:
+            message = {"role": "assistant", "content": "Pull requests are reviewed before 11:00."}
+        return httpx.Response(200, json={
+            "id": f"c{calls['n']}", "object": "chat.completion", "created": 0, "model": "fake",
+            "choices": [{"index": 0, "message": message,
+                         "finish_reason": "tool_calls" if calls["n"] == 1 else "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })  # fmt: skip
+
+    return httpx.MockTransport(handler)
+
+
+def test_two_agent_sessions_in_one_process(tmp_path: Path) -> None:
+    """Regression: a second run under a NEW event loop used to fail with 'Event loop is
+    closed' because langchain-openai reused one HTTP client bound to the first loop."""
+    from agents.langgraph_agent import chat_model
+
+    settings = AgentSettings(llm_base_url="http://fake-llm/v1", llm_model="fake")
+
+    async def one_session(i: int) -> Any:
+        (tmp_path / f"run{i}").mkdir()
+        async with (
+            gateway_app(tmp_path / f"run{i}") as app,
+            agent_client(app) as client,
+            chat_model(settings, transport=_fake_openai()) as llm,
+        ):
+            return await run_task("When are PRs reviewed?", client=client, model=llm,
+                                  servers=["filesystem"])  # fmt: skip
+
+    runs = [asyncio.run(one_session(i)) for i in range(2)]  # two separate event loops
+    for run in runs:
+        assert [(c.tool, c.outcome) for c in run.calls] == [("filesystem.read_file", "ALLOW")]
+        assert "11:00" in run.answer
