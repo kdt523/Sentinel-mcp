@@ -45,6 +45,13 @@ BASE = "http://127.0.0.1:8000"
 ENV_TEXT = (SEED_DIR / ".env").read_text(encoding="utf-8")
 
 
+def sink_for(engine: Any) -> Any:
+    """Synchronous decision-log sink writing to the same SQLite file as ``engine``."""
+    from gateway.db.sink import create_sink
+
+    return create_sink(engine.url.render_as_string(hide_password=False))
+
+
 @dataclass
 class Stack:
     app: Any
@@ -82,7 +89,7 @@ async def gateway(tmp_path: Path, *, shadow: bool = False, weather_mode: str = "
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'log.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    recorder = DecisionRecorder(engine)
+    recorder = DecisionRecorder(sink_for(engine))
     policy = PolicyEngine.load(REPO / "policies" / "default.yaml")
     upstreams = UpstreamManager({
         "filesystem": build_fs(prepare_sandbox(tmp_path / "fs")),

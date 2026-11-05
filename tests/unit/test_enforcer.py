@@ -21,6 +21,13 @@ from tools_servers.poisoned_output.server import TICKETS
 POLICY = Path(__file__).resolve().parents[2] / "policies" / "default.yaml"
 
 
+def sink_for(engine: Any) -> Any:
+    """Synchronous decision-log sink writing to the same SQLite file as ``engine``."""
+    from gateway.db.sink import create_sink
+
+    return create_sink(engine.url.render_as_string(hide_password=False))
+
+
 @pytest.fixture
 async def redis() -> AsyncIterator[fakeredis.FakeAsyncRedis]:
     r = fakeredis.FakeAsyncRedis()
@@ -224,7 +231,7 @@ async def test_approval_lifecycle_is_recorded(
     eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'a.db'}")
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    rec = DecisionRecorder(eng)
+    rec = DecisionRecorder(sink_for(eng))
     await rec.start()
     e = enforcer(tracker, store, recorder=rec, approval_timeout_s=0.15)
     expired = await e.enforce(req(), dec(Action.REQUIRE_APPROVAL))

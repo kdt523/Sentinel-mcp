@@ -32,6 +32,18 @@ KEY = "fake-admin-key-for-tests"
 AUTH = {"Authorization": f"Bearer {KEY}"}
 
 
+def sink_for(engine: Any) -> Any:
+    """Synchronous decision-log sink writing to the same SQLite file as ``engine``."""
+    from gateway.db.sink import create_sink
+
+    return create_sink(engine.url.render_as_string(hide_password=False))
+
+
+def _engine(tmp_path: Path) -> Any:
+    """Async reader for the decision-log SQLite file the app writes to."""
+    return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'log.db'}")
+
+
 @asynccontextmanager
 async def running(tmp_path: Path, *, key: str | None = KEY,
                   extra: dict[str, Any] | None = None) -> AsyncIterator[GatewayApp]:  # fmt: skip
@@ -50,7 +62,7 @@ async def running(tmp_path: Path, *, key: str | None = KEY,
         "email_send": build_email(tmp_path / "outbox.jsonl", ("acme.example",)),
         **(extra or {}),
     }
-    app = create_app(settings, redis=fakeredis.FakeAsyncRedis(), engine=engine,
+    app = create_app(settings, redis=fakeredis.FakeAsyncRedis(), sink=sink_for(engine),
                      upstream_targets=targets)  # fmt: skip
     async with app.api.router.lifespan_context(app.api):
         with anyio.fail_after(60):
@@ -138,7 +150,7 @@ async def test_approve_records_approver_note_and_conflicts(tmp_path: Path) -> No
         bad = await admin.post(f"/approvals/{aid}/approve", headers=AUTH, json={})
         res = await call
         await asyncio.wait_for(app.api.state.admin.recorder._queue.join(), 10)
-        async with app.api.state.admin.engine.connect() as conn:
+        async with _engine(tmp_path).connect() as conn:
             row = (await conn.execute(select(ApprovalRow))).one()
     assert pending["status"] == "pending" and pending["qualified_tool"] == "email_send.send"
     assert ok.status_code == 200 and ok.json()["status"] == "approved"
@@ -169,7 +181,7 @@ async def test_session_view_is_redacted(tmp_path: Path) -> None:
         async with mcp_client(app) as agent:
             await agent.call_tool("filesystem.read_file", {"path": ".env"})
         await asyncio.wait_for(app.api.state.admin.recorder._queue.join(), 10)
-        async with app.api.state.admin.engine.connect() as conn:
+        async with _engine(tmp_path).connect() as conn:
             from gateway.db.models import DecisionRow
 
             sid = (await conn.execute(select(DecisionRow.session_id))).scalars().first()

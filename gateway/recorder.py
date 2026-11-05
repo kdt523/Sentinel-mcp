@@ -3,7 +3,8 @@
 ``submit()`` is synchronous and O(1): it builds a redacted row and puts it on a bounded
 queue. A background worker writes batches to the database. If the queue is full the row
 is dropped and counted (``dropped``); if the database fails the batch is retried once and
-then dropped and counted (``failed``). Deciding never waits for Postgres.
+then dropped and counted (``failed``). Deciding never waits for Postgres: database calls
+are blocking and run in a worker thread (see gateway/db/sink.py for why).
 
 Optional raw capture (Phase 2 dataset building) appends FULL, UNREDACTED events to
 ``capture_dir/events-YYYYMMDD.jsonl``. It is refused outside the sandbox (see Settings)
@@ -20,15 +21,11 @@ from pathlib import Path
 from typing import Any, Literal
 
 import structlog
-from sqlalchemy import insert
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from gateway.config import Settings
-from gateway.db.models import ApprovalRow, DecisionRow, SessionRow
+from gateway.db.sink import DecisionSink, create_sink
 from gateway.detectors import redact_deep, redact_secrets
-from gateway.models import Action, Decision, Event
+from gateway.models import Decision, Event
 
 log = structlog.get_logger("sentinel.recorder")
 PREVIEW_CHARS = 500
@@ -72,41 +69,37 @@ def decision_row(event: Event, decision: Decision, *, enforced: bool) -> dict[st
     }
 
 
-def create_db_engine(settings: Settings) -> AsyncEngine:
-    url = settings.database_url
-    if url.startswith("sqlite"):
-        return create_async_engine(url)
-    return create_async_engine(
-        url,
-        pool_size=settings.db_pool_size,
-        pool_pre_ping=True,
-        connect_args={"connect_timeout": settings.db_connect_timeout_s},
-    )
-
-
 class DecisionRecorder:
     def __init__(
         self,
-        engine: AsyncEngine,
+        sink: DecisionSink,
         *,
         queue_size: int = 10_000,
         batch_size: int = 200,
         capture_dir: Path | None = None,
     ) -> None:
-        self._engine = engine
+        self.sink = sink
         self._queue: asyncio.Queue[_Item] = asyncio.Queue(maxsize=queue_size)
         self._batch_size = batch_size
         self._capture_dir = capture_dir
         self._worker: asyncio.Task[None] | None = None
         self.submitted = 0
         self.written = 0
-        self.dropped = 0  # queue full
+        self.dropped = 0  # queue full / unflushed at shutdown
         self.failed = 0  # database errors after retry
 
     @classmethod
-    def from_settings(cls, engine: AsyncEngine, settings: Settings) -> DecisionRecorder:
+    def from_settings(
+        cls, settings: Settings, sink: DecisionSink | None = None
+    ) -> DecisionRecorder:
+        if sink is None:
+            sink = create_sink(
+                settings.database_url,
+                max_size=settings.db_pool_size,
+                timeout_s=settings.db_connect_timeout_s,
+            )
         return cls(
-            engine,
+            sink,
             queue_size=settings.decision_log_queue_size,
             batch_size=settings.decision_log_batch_size,
             capture_dir=settings.capture_dir if settings.capture_mode else None,
@@ -119,6 +112,10 @@ class DecisionRecorder:
     @property
     def pending(self) -> int:
         return self._queue.qsize()
+
+    async def ping(self) -> None:
+        """Database health check (runs in a worker thread)."""
+        await asyncio.to_thread(self.sink.ping)
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -135,22 +132,27 @@ class DecisionRecorder:
             )
         self._worker = asyncio.create_task(self._run(), name="decision-recorder")
 
-    async def stop(self, timeout_s: float = 10.0) -> None:
-        """Flush what is queued (bounded by ``timeout_s``), then stop the worker."""
-        if self._worker is None:
-            return
-        try:
-            await asyncio.wait_for(self._queue.join(), timeout=timeout_s)
-        except TimeoutError:
-            lost = self._queue.qsize()
-            self.dropped += lost
-            log.error("decision_log_flush_timeout", unflushed=lost, timeout_s=timeout_s)
-        self._worker.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._worker
-        self._worker = None
-        log.info("decision_recorder_stopped", written=self.written, dropped=self.dropped,
-                 failed=self.failed)  # fmt: skip
+    async def stop(self, timeout_s: float = 10.0, *, close_sink: bool = True) -> None:
+        """Flush what is queued (bounded by ``timeout_s``), stop the worker, close the sink."""
+        if self._worker is not None:
+            try:
+                await asyncio.wait_for(self._queue.join(), timeout=timeout_s)
+            except TimeoutError:
+                lost = self._queue.qsize()
+                self.dropped += lost
+                log.error("decision_log_flush_timeout", unflushed=lost, timeout_s=timeout_s)
+            self._worker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._worker
+            self._worker = None
+            log.info(
+                "decision_recorder_stopped",
+                written=self.written,
+                dropped=self.dropped,
+                failed=self.failed,
+            )
+        if close_sink:
+            await asyncio.to_thread(self.sink.close)
 
     # ----------------------------------------------------------------- submit
 
@@ -186,8 +188,11 @@ class DecisionRecorder:
         except asyncio.QueueFull:
             self.dropped += 1
             if self.dropped == 1 or self.dropped % _DROP_LOG_EVERY == 0:
-                log.error("decision_log_queue_full", dropped_total=self.dropped,
-                          queue_size=self._queue.maxsize)  # fmt: skip
+                log.error(
+                    "decision_log_queue_full",
+                    dropped_total=self.dropped,
+                    queue_size=self._queue.maxsize,
+                )
             return False
 
     # ----------------------------------------------------------------- worker
@@ -206,13 +211,19 @@ class DecisionRecorder:
 
     async def _write(self, batch: list[_Item]) -> None:
         rows = [row for kind, row, _ in batch if kind == "decision"]
-        if rows and not await self._try_insert(rows, attempts=2) and len(rows) > 1:
-            # Isolate bad rows (e.g. duplicate event_id) so one row cannot sink a batch.
-            for row in rows:
-                await self._try_insert([row], attempts=1)
+        if rows and not await self._try(self.sink.write_decisions, rows, len(rows), attempts=2):
+            if len(rows) > 1:
+                # Isolate bad rows (e.g. duplicate event_id) so one row cannot sink a batch.
+                for row in rows:
+                    if not await self._try(self.sink.write_decisions, [row], 1, attempts=1):
+                        self.failed += 1
+            else:
+                self.failed += 1
         for kind, row, _ in batch:  # in queue order, so a resolution lands after its request
-            if kind == "approval":
-                await self._try_upsert_approval(row)
+            if kind == "approval" and not await self._try(
+                self.sink.upsert_approval, row, 1, attempts=2
+            ):
+                self.failed += 1
         raws = [raw for _, _, raw in batch if raw is not None]
         if raws and self._capture_dir is not None:
             try:
@@ -220,76 +231,24 @@ class DecisionRecorder:
             except OSError as exc:
                 log.error("raw_capture_write_failed", error=str(exc)[:300])
 
-    async def _try_insert(self, rows: list[dict[str, Any]], *, attempts: int) -> bool:
+    async def _try(self, fn: Any, arg: Any, n_rows: int, *, attempts: int) -> bool:
+        """Run a blocking sink call in a worker thread; count rows written on success."""
         for attempt in range(1, attempts + 1):
             try:
-                await self._insert(rows)
+                await asyncio.to_thread(fn, arg)
             except Exception as exc:  # noqa: BLE001 - logging must never crash the gateway
                 if attempt < attempts:
                     await asyncio.sleep(RETRY_DELAY_S)
                     continue
-                if len(rows) == 1:
-                    self.failed += 1
-                log.error("decision_log_write_failed", rows=len(rows),
-                          error=f"{type(exc).__name__}: {exc}"[:300])  # fmt: skip
+                log.error(
+                    "decision_log_write_failed",
+                    rows=n_rows,
+                    error=f"{type(exc).__name__}: {exc}"[:300],
+                )
                 return False
-            self.written += len(rows)
+            self.written += n_rows
             return True
         return False
-
-    async def _insert(self, rows: list[dict[str, Any]]) -> None:
-        sessions: dict[str, dict[str, Any]] = {}
-        for r in rows:
-            s = sessions.setdefault(
-                r["session_id"],
-                {"session_id": r["session_id"], "last_seen_at": r["event_ts"], "event_count": 0,
-                 "terminated": False, "terminated_reason": None},
-            )  # fmt: skip
-            s["last_seen_at"] = max(s["last_seen_at"], r["event_ts"])
-            s["event_count"] += 1
-            if r["action"] == Action.TERMINATE_SESSION.value and r["enforced"]:
-                s["terminated"], s["terminated_reason"] = True, r["reason"]
-
-        dialect = self._engine.dialect.name
-        ins = pg_insert if dialect == "postgresql" else sqlite_insert
-        async with self._engine.begin() as conn:
-            await conn.execute(insert(DecisionRow), rows)
-            for s in sessions.values():
-                stmt = ins(SessionRow).values(**s)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=[SessionRow.session_id],
-                    set_={
-                        "last_seen_at": stmt.excluded.last_seen_at,
-                        "event_count": SessionRow.event_count + stmt.excluded.event_count,
-                        "terminated": SessionRow.terminated | stmt.excluded.terminated,
-                        "terminated_reason": stmt.excluded.terminated_reason
-                        if s["terminated"]
-                        else SessionRow.terminated_reason,
-                    },
-                )
-                await conn.execute(stmt)
-
-    async def _try_upsert_approval(self, row: dict[str, Any]) -> None:
-        ins = pg_insert if self._engine.dialect.name == "postgresql" else sqlite_insert
-        stmt = ins(ApprovalRow).values(**row)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=[ApprovalRow.approval_id],
-            set_={k: stmt.excluded[k] for k in ("status", "resolved_at", "resolved_by", "note")},
-        )
-        for attempt in (1, 2):
-            try:
-                async with self._engine.begin() as conn:
-                    await conn.execute(stmt)
-            except Exception as exc:  # noqa: BLE001 - logging must never crash the gateway
-                if attempt == 1:
-                    await asyncio.sleep(RETRY_DELAY_S)
-                    continue
-                self.failed += 1
-                log.error("approval_log_write_failed", approval_id=row.get("approval_id"),
-                          error=f"{type(exc).__name__}: {exc}"[:300])  # fmt: skip
-                return
-            self.written += 1
-            return
 
     def _append_capture(self, raws: list[dict[str, Any]]) -> None:
         assert self._capture_dir is not None

@@ -16,6 +16,15 @@ from gateway.recorder import DecisionRecorder, decision_row
 from tools_servers.sandbox import SEED_DIR
 
 ENV_TEXT = (SEED_DIR / ".env").read_text(encoding="utf-8")
+
+
+def sink_for(engine: Any) -> Any:
+    """Synchronous decision-log sink writing to the same SQLite file as ``engine``."""
+    from gateway.db.sink import create_sink
+
+    return create_sink(engine.url.render_as_string(hide_password=False))
+
+
 SECRETS = ("sk-fake-0000", "fake-db-password-not-real", "fake-jwt-secret")
 
 
@@ -55,7 +64,7 @@ async def sessions(engine: AsyncEngine) -> dict[str, Any]:
 
 
 async def test_writes_all_fields_and_session_rollup(engine: AsyncEngine) -> None:
-    r = DecisionRecorder(engine, batch_size=3)
+    r = DecisionRecorder(sink_for(engine), batch_size=3)
     await r.start()
     for i in range(7):
         r.submit(req(path=f"docs/{i}.md"), dec(), enforced=False)
@@ -74,7 +83,7 @@ async def test_writes_all_fields_and_session_rollup(engine: AsyncEngine) -> None
 
 
 async def test_shadow_terminate_does_not_mark_session_terminated(engine: AsyncEngine) -> None:
-    r = DecisionRecorder(engine)
+    r = DecisionRecorder(sink_for(engine))
     await r.start()
     r.submit(req(), dec(Action.TERMINATE_SESSION, "exfil", "secret-flow"), enforced=False)
     await r.stop()
@@ -82,7 +91,7 @@ async def test_shadow_terminate_does_not_mark_session_terminated(engine: AsyncEn
 
 
 async def test_no_raw_secrets_in_database(engine: AsyncEngine) -> None:
-    r = DecisionRecorder(engine)
+    r = DecisionRecorder(sink_for(engine))
     await r.start()
     leak = req(tool_arg=ENV_TEXT, nested={"x": ["sk-fake-0000000000000000000000000000SANDBOX"]})
     out = Event.from_output(session_id="s1", server="filesystem", tool="read_file",
@@ -101,20 +110,22 @@ async def test_no_raw_secrets_in_database(engine: AsyncEngine) -> None:
 
 
 async def test_bounded_queue_drops_and_counts(engine: AsyncEngine) -> None:
-    r = DecisionRecorder(engine, queue_size=2)  # worker not started: nothing drains
+    r = DecisionRecorder(sink_for(engine), queue_size=2)  # worker not started: nothing drains
     results = [r.submit(req(), dec(), enforced=True) for _ in range(5)]
     assert results == [True, True, False, False, False]
     assert r.dropped == 3 and r.submitted == 5 and r.pending == 2
 
 
-async def test_submit_never_blocks_even_when_db_hangs(
-    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def hang(self: DecisionRecorder, rows: list[dict[str, Any]]) -> None:
-        await asyncio.sleep(3600)
+async def test_submit_never_blocks_even_when_db_hangs(engine: AsyncEngine) -> None:
+    import time
 
-    monkeypatch.setattr(DecisionRecorder, "_insert", hang)
-    r = DecisionRecorder(engine, queue_size=5)
+    sink = sink_for(engine)
+
+    def hang(rows: list[dict[str, Any]]) -> None:  # blocking DB call stuck in its thread
+        time.sleep(1.0)
+
+    sink.write_decisions = hang
+    r = DecisionRecorder(sink, queue_size=5)
     await r.start()
     loop = asyncio.get_running_loop()
     t0 = loop.time()
@@ -128,7 +139,7 @@ async def test_submit_never_blocks_even_when_db_hangs(
 
 async def test_db_failure_is_counted_and_worker_survives(tmp_path: Path) -> None:
     eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'empty.db'}")  # no tables yet
-    r = DecisionRecorder(eng)
+    r = DecisionRecorder(sink_for(eng))
     await r.start()
     with capture_logs() as logs:
         r.submit(req(), dec(), enforced=True)
@@ -144,7 +155,7 @@ async def test_db_failure_is_counted_and_worker_survives(tmp_path: Path) -> None
 
 
 async def test_bad_row_does_not_sink_its_batch(engine: AsyncEngine) -> None:
-    r = DecisionRecorder(engine, batch_size=50)
+    r = DecisionRecorder(sink_for(engine), batch_size=50)
     dup = req()
     for ev in (req(), dup, dup, req()):  # duplicate event_id violates the unique constraint
         r.submit(ev, dec(), enforced=True)
@@ -156,7 +167,7 @@ async def test_bad_row_does_not_sink_its_batch(engine: AsyncEngine) -> None:
 
 async def test_capture_mode_writes_raw_and_warns(engine: AsyncEngine, tmp_path: Path) -> None:
     cap = tmp_path / "raw"
-    r = DecisionRecorder(engine, capture_dir=cap)
+    r = DecisionRecorder(sink_for(engine), capture_dir=cap)
     with capture_logs() as logs:
         await r.start()
     assert any(e["event"] == "raw_capture_enabled" and e["log_level"] == "warning" for e in logs)
@@ -175,7 +186,7 @@ async def test_capture_mode_writes_raw_and_warns(engine: AsyncEngine, tmp_path: 
 
 
 async def test_no_capture_by_default(engine: AsyncEngine, tmp_path: Path) -> None:
-    r = DecisionRecorder(engine)
+    r = DecisionRecorder(sink_for(engine))
     assert not r.capturing
     await r.start()
     r.submit(req(), dec(), enforced=True)

@@ -16,18 +16,18 @@ from typing import Any
 import structlog
 from fastapi import FastAPI
 from redis.asyncio import Redis
-from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.types import Receive, Scope, Send
 
 from gateway.admin import AdminDeps, build_admin_router
 from gateway.approvals import ApprovalStore
 from gateway.config import Settings, get_settings
+from gateway.db.sink import DecisionSink
 from gateway.decider import PipelineDecider
 from gateway.enforcer import Enforcer
 from gateway.logging import configure_logging
 from gateway.policy import PolicyEngine
 from gateway.proxy import GatewayProxy, build_mcp_app
-from gateway.recorder import DecisionRecorder, create_db_engine
+from gateway.recorder import DecisionRecorder
 from gateway.session import SessionTracker, create_redis
 from gateway.session_identity import McpSessionIdResolver
 from gateway.upstream import UpstreamManager, load_servers
@@ -55,14 +55,13 @@ def create_app(
     settings: Settings | None = None,
     *,
     redis: Redis | None = None,
-    engine: AsyncEngine | None = None,
+    sink: DecisionSink | None = None,
     upstream_targets: dict[str, Any] | None = None,
 ) -> GatewayApp:
-    """Wire the gateway. ``redis`` / ``engine`` / ``upstream_targets`` are injection points
+    """Wire the gateway. ``redis`` / ``sink`` / ``upstream_targets`` are injection points
     for tests; by default everything comes from settings and config/servers.yaml."""
     settings = settings or get_settings()
     redis = redis if redis is not None else create_redis(settings)
-    engine = engine if engine is not None else create_db_engine(settings)
     policy = PolicyEngine.load(settings.policy_path)
     if upstream_targets is not None:
         upstreams = UpstreamManager(upstream_targets)
@@ -70,7 +69,7 @@ def create_app(
         upstreams = UpstreamManager.from_specs(load_servers(settings.servers_path))
     tracker = SessionTracker.from_settings(redis, settings)
     approvals = ApprovalStore(redis, ttl_s=settings.session_ttl_s)
-    recorder = DecisionRecorder.from_settings(engine, settings)
+    recorder = DecisionRecorder.from_settings(settings, sink)
     enforcer = Enforcer(
         tracker,
         approvals,
@@ -110,13 +109,12 @@ def create_app(
         finally:
             await recorder.stop(timeout_s=settings.decision_log_flush_timeout_s)
             await redis.aclose()
-            await engine.dispose()
             log.info("gateway_stopped")
 
     api = FastAPI(title="SentinelMCP gateway", version="0.1.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)  # fmt: skip
     api.state.admin = AdminDeps(
-        settings=settings, redis=redis, engine=engine, tracker=tracker, approvals=approvals,
+        settings=settings, redis=redis, tracker=tracker, approvals=approvals,
         recorder=recorder, upstreams=upstreams, policy=policy,
     )  # fmt: skip
     api.include_router(build_admin_router())

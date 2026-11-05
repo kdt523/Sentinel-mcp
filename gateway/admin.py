@@ -18,8 +18,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from redis.asyncio import Redis
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gateway.approvals import Approval, ApprovalStore
 from gateway.config import Settings
@@ -38,7 +36,6 @@ PROBE_TIMEOUT_S = 1.0
 class AdminDeps:
     settings: Settings
     redis: Redis
-    engine: AsyncEngine
     tracker: SessionTracker
     approvals: ApprovalStore
     recorder: DecisionRecorder
@@ -79,14 +76,9 @@ async def _check(coro: Any) -> str | None:
         return type(exc).__name__
 
 
-async def _db_ping(engine: AsyncEngine) -> None:
-    async with engine.connect() as conn:
-        await conn.execute(text("SELECT 1"))
-
-
 async def _readiness(deps: AdminDeps) -> dict[str, Any]:
     redis_err, db_err = await asyncio.gather(
-        _check(deps.redis.ping()), _check(_db_ping(deps.engine))
+        _check(deps.redis.ping()), _check(deps.recorder.ping())
     )
     upstreams = deps.upstreams.status()
     # Deciding needs Redis and the upstreams; the decision log is async and failure-tolerant,
