@@ -118,6 +118,7 @@ class AttackMark:
     prior_destructive_attempts: int = 0
     description_changed: bool = False
     target_tool: str | None = None  # description events: the poisoned tool (<server>.<tool>)
+    also: tuple[str, ...] = ()  # further families that apply (most severe gold wins)
 
 
 @dataclass(frozen=True)
@@ -185,4 +186,11 @@ def expand(template: Template, *, seed: int) -> list[SessionSpec]:
 
 
 def expand_all(seed: int = 42, path: Path = TEMPLATES_PATH) -> list[SessionSpec]:
-    return [s for t in load_templates(path) for s in expand(t, seed=seed)]
+    from data.destructive_check import undertagged
+
+    sessions = [s for t in load_templates(path) for s in expand(t, seed=seed)]
+    problems = [f"{s.seed_id}: {msg}" for s in sessions for st in s.steps
+                if (msg := undertagged(st)) is not None]  # fmt: skip
+    if problems:  # a benign step must never look obviously destructive
+        raise TemplateError("; ".join(problems[:20]))
+    return sessions

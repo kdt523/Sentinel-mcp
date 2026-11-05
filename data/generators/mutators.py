@@ -295,6 +295,9 @@ def mutate_all(seeds: Iterable[Unit], *, ops: Sequence[str] | None = None,
             m = mutate(u, op, seed_value=seed)
             if m is not None:
                 out.append(m)
+    from data.attacks.templates import check_destructive_tags
+
+    check_destructive_tags(out)  # a mutation must not produce an untagged destructive step
     return out
 
 

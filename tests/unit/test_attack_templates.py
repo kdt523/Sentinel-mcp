@@ -69,9 +69,56 @@ def test_gold_actions_follow_labeling_rules() -> None:
         assert any(g is not None for g in golds), u.seed_id
         for st, g in zip(u.steps, golds, strict=True):
             if st.attack is not None:
-                assert g in expected[st.attack.family], (u.seed_id, st.attack, g)
-                seen.setdefault(st.attack.family, set()).add(g)
+                fam = _reported_family(st)  # most severe of family + also
+                assert g in expected[fam], (u.seed_id, st.attack, g)
+                seen.setdefault(fam, set()).add(g)
     assert seen == expected
+
+
+def _reported_family(st: object) -> str:
+    from data.labeling import gold_for_mark
+    from gateway.models import Direction, EventKind
+
+    m = st.attack  # type: ignore[attr-defined]
+    direction = Direction.REQUEST if m.event == "request" else Direction.OUTPUT
+    kind = EventKind.TOOL_DESCRIPTION if m.event == "description" else EventKind.TOOL_CALL
+    return gold_for_mark(m, direction, kind, m.description_changed)[1].value
+
+
+def test_social_engineering_gold_depends_on_scope() -> None:
+    """Unscoped UPDATE under pressure is also destructive (BLOCK wins); a scoped change under
+    pressure is a genuine REQUIRE_APPROVAL case."""
+    unscoped = [u for u in UNITS if u.template_id == "se_admin_override_sql"]
+    scoped = [u for u in UNITS if u.template_id == "se_scoped_plan_change"]
+    assert unscoped and all(gold_actions(u.steps) == [Action.BLOCK] for u in unscoped)
+    assert all(_reported_family(u.steps[0]) == "destructive" for u in unscoped)
+    assert len(scoped) >= 10
+    assert all(gold_actions(u.steps) == [Action.REQUIRE_APPROVAL] for u in scoped)
+
+
+def test_destructive_patterns_must_be_tagged() -> None:
+    from dataclasses import replace
+
+    from data.attacks.templates import check_destructive_tags
+    from data.destructive_check import destructive_rule
+
+    u = next(u for u in UNITS if u.template_id == "se_admin_override_sql")
+    mark = u.steps[0].attack
+    assert mark is not None
+    untagged = replace(u, steps=(replace(u.steps[0], attack=replace(mark, also=())),))
+    with pytest.raises(TemplateError, match="not tagged destructive"):
+        check_destructive_tags([untagged])
+    check_destructive_tags(UNITS)  # the real templates pass
+    assert destructive_rule("sql_db.execute", {"sql": "-- x" + chr(10) + "DELETE FROM orders"})
+    assert (
+        destructive_rule("sql_db.execute", {"sql": "DELETE FROM orders WHERE order_id = 3"}) is None
+    )
+
+
+def test_benign_steps_never_match_a_destructive_rule() -> None:
+    from data.destructive_check import undertagged
+
+    assert not [st for s in expand_benign(seed=42) for st in s.steps if undertagged(st)]
 
 
 def test_retry_after_block_revokes() -> None:
@@ -283,3 +330,12 @@ async def test_every_non_shell_attack_session_runs_in_the_sandbox(tmp_path: Path
                         failures.append(f"{u.seed_id} {st.tool} {str(st.args)[:80]}: "
                                         f"{result_text(res)[:120]}")  # fmt: skip
     assert not failures, "\n".join(failures[:25])
+
+
+def test_attack_composites_are_stable_when_units_are_added() -> None:
+    """Adding a template must not change any other session's composite (so only affected
+    sessions need recapturing)."""
+    subset = [u for u in UNITS if u.template_id != "se_scoped_plan_change"]
+    fewer = compose_attacks(subset, SPLITS, BENIGN, BENIGN_SPLITS, seed=42)
+    full = {c.session_key: c for c in COMPOSITES}
+    assert all(full[c.session_key] == c for c in fewer)

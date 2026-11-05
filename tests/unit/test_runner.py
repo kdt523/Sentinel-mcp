@@ -103,7 +103,8 @@ async def test_exfil_session_labels_post_termination_and_own_values(tmp_path: Pa
     assert mal[0].context.taint_classes == ["secret"]  # state BEFORE the leaking request
     assert values.api_key in str(mal[0].event.args)  # this session's own fake secret
     read = next(s for s in samples if s.event.direction is Direction.OUTPUT
-                and s.event.tool == "read_file" and ".env" in str(s.history[-1:]))  # fmt: skip
+                and s.event.kind is EventKind.TOOL_CALL and s.event.tool == "read_file"
+                and "FAKE_API_KEY" in (s.event.output or ""))  # fmt: skip
     assert values.api_key in (read.event.output or "")
     assert all(s.session_family is AttackFamily.MULTI_STEP_EXFIL for s in samples)
     assert all(s.split is c.split and s.source == "generated" for s in samples)

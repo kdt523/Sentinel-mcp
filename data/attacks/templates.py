@@ -32,7 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from data.benign.templates import _SLOT, MIN_VARIATIONS, AttackMark, StepCall, TemplateError, _fill
 from data.composer import Composite, Unit, assign_splits, compose, resolve_unit
-from data.labeling import EventFacts, gold_action
+from data.labeling import EventFacts, gold_for_families, gold_for_mark
 from data.sandbox_values import SessionValues
 from data.schema import HELDOUT_FAMILIES, AttackFamily, Split
 from gateway.models import Action, Direction, EventKind
@@ -62,6 +62,9 @@ class MarkSpec(BaseModel):
     prior_destructive_attempts: int = Field(default=0, ge=0)
     description_changed: bool = False
     target_tool: str | None = None
+    # Further families that ALSO apply to this event (most severe gold wins), e.g. a
+    # social-engineering request that is also an unscoped, destructive UPDATE.
+    also: list[AttackFamily] = Field(default_factory=list)
 
     def facts(self) -> EventFacts:
         return EventFacts(
@@ -89,7 +92,8 @@ class AttackStepSpec(BaseModel):
             need = "<server>.<tool>" if self.op == "call" else "<server>"
             raise ValueError(f"{self.op} step needs {need}")
         if self.attack is not None:
-            gold_action(self.attack.facts())  # raises LabelingError for undefined combos
+            # raises LabelingError for undefined combos (every family must be defined)
+            gold_for_families([self.attack.family, *self.attack.also], self.attack.facts())
             if (self.attack.event == "description") != (self.op == "list_tools"):
                 raise ValueError("description events come from list_tools steps")
         return self
@@ -183,7 +187,8 @@ def _mark(spec: MarkSpec | None) -> AttackMark | None:
     return AttackMark(event=spec.event, family=spec.family.value, leaked_class=spec.leaked_class,
                       prior_destructive_attempts=spec.prior_destructive_attempts,
                       description_changed=spec.description_changed,
-                      target_tool=spec.target_tool)  # fmt: skip
+                      target_tool=spec.target_tool,
+                      also=tuple(f.value for f in spec.also))  # fmt: skip
 
 
 def expand(template: AttackTemplate, *, seed: int) -> list[Unit]:
@@ -212,7 +217,20 @@ def expand(template: AttackTemplate, *, seed: int) -> list[Unit]:
 
 
 def expand_all(seed: int = 42, path: Path = TEMPLATES_PATH) -> list[Unit]:
-    return [u for t in load_attack_templates(path) for u in expand(t, seed=seed)]
+    units = [u for t in load_attack_templates(path) for u in expand(t, seed=seed)]
+    check_destructive_tags(units)
+    return units
+
+
+def check_destructive_tags(units: Sequence[Unit]) -> None:
+    """Build error if any step matches a frozen destructive rule without a destructive tag
+    (data/destructive_check.py): gold may never be milder than an obvious pattern."""
+    from data.destructive_check import undertagged
+
+    problems = [f"{u.seed_id}: {msg}" for u in units for st in u.steps
+                if (msg := undertagged(st)) is not None]  # fmt: skip
+    if problems:
+        raise TemplateError("; ".join(problems[:20]))
 
 
 def assign_attack_splits(units: Sequence[Unit], *, seed: int,
@@ -348,13 +366,9 @@ def gold_actions(steps: Sequence[StepCall]) -> list[Action | None]:
         if m is None:
             out.append(None)
             continue
-        out.append(gold_action(EventFacts(
-            family=AttackFamily(m.family),
-            direction=Direction.REQUEST if m.event == "request" else Direction.OUTPUT,
-            kind=EventKind.TOOL_DESCRIPTION if m.event == "description" else EventKind.TOOL_CALL,
-            leaked_class=m.leaked_class, prior_destructive_attempts=m.prior_destructive_attempts,
-            description_changed=m.description_changed,
-        )))  # fmt: skip
+        direction = Direction.REQUEST if m.event == "request" else Direction.OUTPUT
+        kind = EventKind.TOOL_DESCRIPTION if m.event == "description" else EventKind.TOOL_CALL
+        out.append(gold_for_mark(m, direction, kind, m.description_changed)[0])
     return out
 
 
@@ -367,7 +381,6 @@ def compose_attacks(attack_units: Sequence[Unit], attack_splits: dict[str, Split
     """Attack composites with the SAME construction as benign ones (guardrail (a)): each
     attack unit is the focal unit among benign fillers of its own split (guardrail (b)).
     test_heldout attacks take fillers from the benign test_heldout pool."""
-    rng = random.Random(f"{seed}:attack-composites")
     pools: dict[Split, list[Unit]] = defaultdict(list)
     for u in benign_units:
         sp = benign_splits[u.seed_id]
@@ -380,6 +393,8 @@ def compose_attacks(attack_units: Sequence[Unit], attack_splits: dict[str, Split
         focal = resolve_content(unit, sp)
         for j in range(n_per_unit):
             key = f"attack-c:{sp.value}:{unit.seed_id}:{j}"
+            # per-session stream: adding or removing units never changes other sessions
+            rng = random.Random(f"{seed}:attack-composite:{key}")
             c = compose(focal, pools[sp], split=sp, kind="attack", key=key, rng=rng)
             out.append(bind_values(c))
     return out

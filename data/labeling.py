@@ -7,6 +7,7 @@ labelled by applying the same rules to the events that actually happened.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from data.schema import AttackFamily
 from gateway.models import Action, Direction, EventKind
@@ -70,3 +71,35 @@ def gold_action(f: EventFacts) -> Action:
 def most_severe(actions: list[Action]) -> Action:
     """When several rules apply to one event, the most severe gold action wins."""
     return max(actions, key=lambda a: SEVERITY[a]) if actions else Action.ALLOW
+
+
+def gold_for_families(
+    families: list[AttackFamily], base: EventFacts
+) -> tuple[Action, AttackFamily]:
+    """Gold action of an event that several families apply to (e.g. a social-engineering
+    request that is also destructive): the most severe wins, and its family is reported.
+    Ties keep the first (primary) family."""
+    best: tuple[Action, AttackFamily] | None = None
+    for fam in families:
+        facts = EventFacts(family=fam, direction=base.direction, kind=base.kind,
+                           leaked_class=base.leaked_class,
+                           prior_destructive_attempts=base.prior_destructive_attempts,
+                           description_changed=base.description_changed)  # fmt: skip
+        action = gold_action(facts)
+        if best is None or SEVERITY[action] > SEVERITY[best[0]]:
+            best = (action, fam)
+    if best is None:
+        raise LabelingError("no family given")
+    return best
+
+
+def gold_for_mark(mark: Any, direction: Direction, kind: EventKind,
+                  description_changed: bool = False) -> tuple[Action, AttackFamily]:  # fmt: skip
+    """Gold action + family for an event carrying a template's attack mark (its primary
+    family plus any ``also`` families)."""
+    families = [AttackFamily(mark.family), *(AttackFamily(f) for f in mark.also)]
+    base = EventFacts(family=families[0], direction=direction, kind=kind,
+                      leaked_class=mark.leaked_class,
+                      prior_destructive_attempts=mark.prior_destructive_attempts,
+                      description_changed=description_changed)  # fmt: skip
+    return gold_for_families(families, base)

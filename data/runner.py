@@ -38,7 +38,7 @@ from typing import Any
 
 from data.benign.templates import StepCall
 from data.composer import Composite, Unit
-from data.labeling import EventFacts, gold_action
+from data.labeling import gold_for_mark
 from data.sandbox_values import SessionValues
 from data.schema import (
     HISTORY_MAX,
@@ -373,14 +373,6 @@ def injection_reached_agent(item: Any, output: str) -> bool:
     return blob in output
 
 
-def _facts(mark: Any, direction: Direction, kind: EventKind,
-           description_changed: bool = False) -> EventFacts:  # fmt: skip
-    return EventFacts(family=AttackFamily(mark.family), direction=direction, kind=kind,
-                      leaked_class=mark.leaked_class,
-                      prior_destructive_attempts=mark.prior_destructive_attempts,
-                      description_changed=description_changed)  # fmt: skip
-
-
 def _align(c: Composite, records: Sequence[Captured]) -> list[StepCall | None]:
     """The scripted step behind each captured non-description event (None for descriptions).
     Requests must match the steps' tools and arguments in order; outputs follow them."""
@@ -432,19 +424,17 @@ def build_samples(result: SessionResult, *, generator: str = "scripted") -> list
             clean = CLEAN_DESCRIPTIONS.get(ev.qualified_tool)
             text = r.raw_output if r.raw_output is not None else (ev.output or "")
             if mark is not None and clean is not None and text != clean:
-                gold = gold_action(_facts(mark, Direction.OUTPUT, EventKind.TOOL_DESCRIPTION,
-                                          ev.description_changed))  # fmt: skip
-                family = AttackFamily(mark.family)
+                gold, family = gold_for_mark(
+                    mark, Direction.OUTPUT, EventKind.TOOL_DESCRIPTION, ev.description_changed
+                )
         elif st is not None and st.attack is not None:
             m = st.attack
             if ev.direction is Direction.REQUEST and m.event == "request":
-                gold = gold_action(_facts(m, Direction.REQUEST, EventKind.TOOL_CALL))
-                family = AttackFamily(m.family)
+                gold, family = gold_for_mark(m, Direction.REQUEST, EventKind.TOOL_CALL)
             elif ev.direction is Direction.OUTPUT and m.event == "output":
                 text = r.raw_output if r.raw_output is not None else (ev.output or "")
                 if injection_reached_agent(_content_item(st.args), text):
-                    gold = gold_action(_facts(m, Direction.OUTPUT, EventKind.TOOL_CALL))
-                    family = AttackFamily(m.family)
+                    gold, family = gold_for_mark(m, Direction.OUTPUT, EventKind.TOOL_CALL)
                 else:
                     neutralised = True
         malicious = gold is not Action.ALLOW
