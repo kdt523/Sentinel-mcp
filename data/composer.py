@@ -168,10 +168,21 @@ def compose(focal: Unit, pool: Sequence[Unit], *, split: Split, kind: str, key: 
     return Composite(key, split, kind, units, pos, values_seed=key)
 
 
-def compose_benign(units: Sequence[Unit], splits: dict[str, Split], *, n: int, seed: int,
+BENIGN_SHARE = 0.60  # target benign share of sessions in every split (60/40)
+
+
+def benign_counts_for_ratio(attack_sessions: dict[Split, int],
+                            benign_share: float = BENIGN_SHARE) -> dict[Split, int]:  # fmt: skip
+    """Benign composites needed per split so benign / (benign + attack) == ``benign_share``."""
+    return {sp: round(n * benign_share / (1 - benign_share)) for sp, n in attack_sessions.items()}
+
+
+def compose_benign(units: Sequence[Unit], splits: dict[str, Split], *, n: int = 0, seed: int,
+                   n_per_split: dict[Split, int] | None = None,
                    hard_negative_share: float | None = None) -> list[Composite]:  # fmt: skip
-    """``n`` benign composites, allocated to splits by ``SPLIT_RATIOS``. The focal unit is a
-    hard negative with the same probability hard negatives have among all units."""
+    """Benign composites: ``n_per_split`` per split, or ``n`` allocated by ``SPLIT_RATIOS``.
+    Focal units cycle through the split's units (each is focal equally often, +-1) and are
+    hard negatives with the same probability hard negatives have among all units."""
     rng = random.Random(f"{seed}:benign-composites")
     by_split: dict[Split, list[Unit]] = defaultdict(list)
     for u in units:
@@ -179,16 +190,33 @@ def compose_benign(units: Sequence[Unit], splits: dict[str, Split], *, n: int, s
     share = hard_negative_share
     if share is None:
         share = sum(u.hard_negative for u in units) / max(1, len(units))
+    counts = n_per_split or {sp: round(n * r) for sp, r in SPLIT_RATIOS.items()}
     out: list[Composite] = []
-    for sp, ratio in SPLIT_RATIOS.items():
+    for sp in SPLIT_RATIOS:
         pool = sorted(by_split[sp], key=lambda u: u.seed_id)
         hard = [u for u in pool if u.hard_negative]
         easy = [u for u in pool if not u.hard_negative]
-        for i in range(round(n * ratio)):
-            group = hard if hard and (not easy or rng.random() < share) else easy
-            focal = rng.choice(group)
+        rng.shuffle(hard)
+        rng.shuffle(easy)
+        cursor = {"hard": 0, "easy": 0}
+        for i in range(counts.get(sp, 0)):
+            kind = "hard" if hard and (not easy or rng.random() < share) else "easy"
+            group = hard if kind == "hard" else easy
+            focal = group[cursor[kind] % len(group)]
+            cursor[kind] += 1
             out.append(compose(focal, pool, split=sp, kind="benign",
                                key=f"benign-c:{sp.value}:{i}", rng=rng))  # fmt: skip
+    return out
+
+
+def split_ratio_report(composites: Sequence[Composite]) -> dict[str, dict[str, float]]:
+    """Benign / attack session counts and benign share per split (for stats.json)."""
+    out: dict[str, dict[str, float]] = {}
+    for sp in SPLIT_RATIOS:
+        b = sum(1 for c in composites if c.split is sp and c.kind == "benign")
+        a = sum(1 for c in composites if c.split is sp and c.kind == "attack")
+        out[sp.value] = {"benign": b, "attack": a,
+                         "benign_share": round(b / (a + b), 3) if a + b else 0.0}  # fmt: skip
     return out
 
 
