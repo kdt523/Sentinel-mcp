@@ -60,8 +60,9 @@ serve = [
     "optimum[onnxruntime]>=1.23",
 ]
 agents = [
-    "langgraph>=0.2",
-    "langchain-openai>=0.2",
+    "langgraph>=1.0",
+    "langchain>=1.0",  # create_agent (replaces langgraph.prebuilt.create_react_agent)
+    "langchain-openai>=1.0",
 ]
 ui = [
     "streamlit>=1.39",

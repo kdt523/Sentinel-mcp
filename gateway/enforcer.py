@@ -96,8 +96,16 @@ async def decide_with_fail_mode(
 # ------------------------------------------------------------------------- enforcer
 
 
+# One distinct prefix per enforcement outcome, so clients (and the scripted agent's
+# `expect` checks) can tell outcomes apart from the result text alone.
+MSG_BLOCKED = "SentinelMCP blocked this call: "
+MSG_REVOKED = "SentinelMCP revoked this tool for the session: "
+MSG_TERMINATED = "SentinelMCP terminated this session: "
+MSG_DENIED = "SentinelMCP denied this call: "  # approval rejected, expired or not requestable
+
+
 def _block_message(decision: Decision) -> str:
-    return f"SentinelMCP blocked this call: {decision.reason}"
+    return f"{MSG_BLOCKED}{decision.reason}"
 
 
 class Enforcer:
@@ -153,10 +161,11 @@ class Enforcer:
             return EnforcementResult(forward=False, enforced=True, message=_block_message(decision))
         if action is Action.REVOKE_TOOL:
             await self.tracker.revoke_tool(event.session_id, event.qualified_tool)
-            return EnforcementResult(forward=False, enforced=True, message=_block_message(decision))
+            msg = f"{MSG_REVOKED}{decision.reason}"
+            return EnforcementResult(forward=False, enforced=True, message=msg)
         if action is Action.TERMINATE_SESSION:
             await self.tracker.terminate(event.session_id, decision.reason)
-            msg = f"SentinelMCP terminated this session: {decision.reason}"
+            msg = f"{MSG_TERMINATED}{decision.reason}"
             return EnforcementResult(forward=False, enforced=True, message=msg)
         if action is Action.REQUIRE_APPROVAL:
             return await self._require_approval(event, decision, progress)
@@ -184,8 +193,8 @@ class Enforcer:
                 log.error("approval_create_failed", error=f"{type(exc).__name__}: {exc}"[:300])
                 return EnforcementResult(
                     forward=False, enforced=True,
-                    message=f"SentinelMCP could not request approval ({type(exc).__name__}); "
-                    "denied.",
+                    message=f"{MSG_DENIED}approval could not be requested "
+                    f"({type(exc).__name__}).",
                 )  # fmt: skip
             self._log_approval(approval)
             log.info("approval_requested", approval_id=approval_id,
@@ -204,14 +213,14 @@ class Enforcer:
                                      approval=final)  # fmt: skip
         if status is ApprovalStatus.EXPIRED:
             msg = (
-                f"SentinelMCP denied this call: approval request timed out after "
+                f"{MSG_DENIED}approval request timed out after "
                 f"{self.approval_timeout_s:g}s with no decision (treated as denied). "
                 f"Original reason: {decision.reason}"
             )
         else:
             who = f" by {final.resolved_by}" if final.resolved_by else ""
             note = f" ({final.note})" if final.note else ""
-            msg = f"SentinelMCP denied this call: rejected{who}{note}. Reason: {decision.reason}"
+            msg = f"{MSG_DENIED}rejected{who}{note}. Reason: {decision.reason}"
         return EnforcementResult(forward=False, enforced=True, message=msg, approval=final)
 
     async def _wait(self, approval: Approval, progress: ProgressFn | None) -> ApprovalStatus:

@@ -1,0 +1,11 @@
+{
+  "name": "indirect injection in tool outputs is sanitized",
+  "steps": [
+    {"tool": "notes.get_ticket", "args": {"ticket_id": "T-2002"},
+     "expect": {"action": "SANITIZE", "not_contains": "DELETE FROM customers"}},
+    {"tool": "notes.search_notes", "args": {"query": ""},
+     "expect": {"action": "SANITIZE", "contains": "Sprint 14 retro", "not_contains": "mailmove-support"}},
+    {"tool": "notes.get_ticket", "args": {"ticket_id": "T-2001"},
+     "expect": {"action": "ALLOW"}}
+  ]
+}

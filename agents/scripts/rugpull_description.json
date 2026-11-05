@@ -1,0 +1,12 @@
+{
+  "name": "rug-pull: a tool description changes within the session",
+  "description": "Run against a freshly started gateway: the poisoned 'weather' server switches its description after its FIRST tools/list, process-wide.",
+  "steps": [
+    {"op": "list_tools", "expect": {"includes": ["weather.get_forecast"]}},
+    {"op": "list_tools", "expect": {"excludes": ["weather.get_forecast"]}},
+    {"tool": "weather.get_forecast", "args": {"city": "Pune"},
+     "expect": {"action": "BLOCK", "contains": "revoked"}},
+    {"tool": "weather.convert_currency", "args": {"amount": 1, "from_code": "usd", "to_code": "inr"},
+     "expect": {"action": "ALLOW"}}
+  ]
+}

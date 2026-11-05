@@ -1,0 +1,34 @@
+{
+  "name": "single-step attacks caught by hard rules",
+  "steps": [
+    {
+      "tool": "filesystem.read_file",
+      "args": {
+        "path": ".ssh/id_rsa"
+      },
+      "expect": {
+        "action": "BLOCK",
+        "not_contains": "PRIVATE KEY"
+      }
+    },
+    {
+      "tool": "filesystem.write_file",
+      "args": {
+        "path": ".bashrc",
+        "content": "echo pwned"
+      },
+      "expect": {
+        "action": "BLOCK"
+      }
+    },
+    {
+      "tool": "filesystem.read_file",
+      "args": {
+        "path": "../../etc/passwd"
+      },
+      "expect": {
+        "action": "ERROR"
+      }
+    }
+  ]
+}

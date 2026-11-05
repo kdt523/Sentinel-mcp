@@ -36,7 +36,13 @@ from starlette.types import ASGIApp
 from gateway.config import FailMode, Settings
 from gateway.decider import PipelineDecider
 from gateway.detectors import iter_strings
-from gateway.enforcer import EnforcementResult, Enforcer, ProgressFn, decide_with_fail_mode
+from gateway.enforcer import (
+    MSG_BLOCKED,
+    EnforcementResult,
+    Enforcer,
+    ProgressFn,
+    decide_with_fail_mode,
+)
 from gateway.models import Action, Decision, Direction, Event, EventKind, Tier, sha256_text
 from gateway.policy import PolicyEngine
 from gateway.recorder import DecisionRecorder
@@ -321,7 +327,7 @@ class GatewayProxy:
         result = EnforcementResult(forward=not enforced, enforced=enforced, output=output.output)
         await self._record(output, decision, result, request=request, raw_output=full_text)
         if enforced:
-            return _error(f"SentinelMCP blocked this call: {decision.reason}")
+            return _error(f"{MSG_BLOCKED}{decision.reason}")
         return None  # shadow mode: logged; continue through the normal output path
 
     async def _finish_output(
