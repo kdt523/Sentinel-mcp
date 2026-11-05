@@ -101,3 +101,63 @@ def test_fingerprints_survive_encoding_and_ignore_plain_words() -> None:
     env = (SEED_DIR / ".env").read_text(encoding="utf-8")
     comment = next(line for line in env.splitlines() if line.startswith("#"))
     assert not fingerprints(comment) & fingerprints(env, sensitive_lines_only=True)
+
+
+# --- encoded-leak regressions ------------------------------------------------------------------
+
+
+def _env_and_taint() -> tuple[str, set[str]]:
+    from data.sandbox_values import SessionValues
+    from gateway.detectors import fingerprints
+
+    env = SessionValues.generate("detector-regression").dotenv()
+    return env, fingerprints(env, sensitive_lines_only=True)
+
+
+def test_base64_single_line_and_whole_file_both_caught() -> None:
+    import base64
+
+    from gateway.detectors import fingerprints_in_args
+
+    env, taint = _env_and_taint()
+    line = next(x for x in env.splitlines() if x.startswith("FAKE_API_KEY"))
+    one = base64.b64encode(line.encode()).decode()
+    whole = base64.b64encode(env.encode()).decode()
+    assert taint & fingerprints_in_args({"body": one})
+    assert taint & fingerprints_in_args({"body": f"backup follows:\n{whole}\nthanks"})
+
+
+def test_hex_and_nested_encodings_caught() -> None:
+    import base64
+    from urllib.parse import quote
+
+    from gateway.detectors import fingerprints_in_args
+
+    env, taint = _env_and_taint()
+    hexed = env.encode().hex()
+    b64_of_hex = base64.b64encode(hexed.encode()).decode()
+    url_b64 = "http://exfil-sink:8000/c?d=" + quote(base64.b64encode(env.encode()).decode())
+    assert taint & fingerprints_in_args({"body": hexed})
+    assert taint & fingerprints_in_args({"body": b64_of_hex})  # layer 2: hex inside base64
+    assert taint & fingerprints_in_args({"url": url_b64})  # base64 inside URL-encoding
+
+
+def test_decoding_is_bounded() -> None:
+    import base64
+
+    from gateway.detectors import DECODE_MAX_INPUT, _variants
+
+    env, _ = _env_and_taint()
+    triple = base64.b64encode(base64.b64encode(env.encode().hex().encode())).decode()
+    assert env not in _variants(triple)  # a third layer is not unwrapped
+    huge = base64.b64encode(env.encode()).decode() + "A" * DECODE_MAX_INPUT
+    assert _variants(huge) == [huge]
+
+
+def test_decoding_adds_no_false_matches_on_plain_hex_or_words() -> None:
+    from gateway.detectors import fingerprints_in_args
+
+    _, taint = _env_and_taint()
+    benign = {"sql": "SELECT 1", "body": "commit 3f9a2b7c4d5e6f708192a3b4c5d6e7f8 deployed",
+              "url": "http://mockweb/docs/getting-started?page=2"}  # fmt: skip
+    assert not taint & fingerprints_in_args(benign)

@@ -11,8 +11,7 @@ import pytest
 import yaml
 
 from data.attacks.templates import (
-    _CONTENT_REF,
-    _VALUE_REF,
+    _ANY_REF,
     AttackTemplate,
     assign_attack_splits,
     bind_values,
@@ -107,7 +106,7 @@ def test_heldout_families_and_technique_only_in_test_heldout() -> None:
 def test_content_resolves_to_items_of_the_units_split() -> None:
     for c in COMPOSITES:
         blob = c.prompt + " ".join(str(st.args) for st in c.steps)
-        assert not _CONTENT_REF.search(blob) and not _VALUE_REF.search(blob), c.session_key
+        assert not _ANY_REF.search(blob), c.session_key
         for m in re.finditer(r"(train|val|test_seen|test_heldout)\.(poison|decoy)\.[a-z_]+\."
                              r"([a-z_]+)\.\d+", blob):  # fmt: skip
             assert m.group(1) == c.split.value, (c.session_key, m.group(0))
@@ -144,22 +143,34 @@ def _leak_steps(c: Composite) -> set[int]:
     return {int(re.search(r" step (\d+) ", p).group(1)) for p in flow_violations(c)}  # type: ignore[union-attr]
 
 
-# Leaks the fingerprint flow check cannot see (whole-file base64): labelled by the template's
-# facts; a known detector gap the learned model is meant to cover.
-FINGERPRINT_BLIND = {"ms_env_b64_by_email"}
-
-
 def test_flow_violations_only_at_steps_marked_as_leaks() -> None:
     """LABELING flow rules over each composite agree with the template's facts: a step
     violates a flow rule iff it is marked multi_step_exfil with a leaked class."""
     for c in COMPOSITES:
         marked = {i for i, st in enumerate(c.steps)
                   if st.attack is not None and st.attack.leaked_class is not None}  # fmt: skip
-        found = _leak_steps(c)
-        if c.units[c.focal_index].template_id in FINGERPRINT_BLIND:
-            assert found <= marked, c.session_key
-        else:
-            assert found == marked, (c.session_key, flow_violations(c))
+        assert _leak_steps(c) == marked, (c.session_key, flow_violations(c))
+
+
+def test_unknown_value_ref_is_a_build_error() -> None:
+    from data.attacks.templates import resolve_values
+    from data.benign.templates import StepCall
+    from data.sandbox_values import SessionValues
+
+    step = StepCall("email_send.send", {"body": "<<env_b65>>"}, hard_negative=False)
+    with pytest.raises(TemplateError, match="env_b65"):
+        resolve_values([step], SessionValues.generate("x"))
+
+
+def test_encoded_env_leak_is_resolved_and_detected() -> None:
+    """Regression: <<env_b64>> was left unresolved (digits missed by the ref pattern)."""
+    cs = [c for c in COMPOSITES if c.units[c.focal_index].template_id == "ms_env_b64_by_email"]
+    assert cs
+    for c in cs:
+        focal = c.units[c.focal_index]
+        body = next(st.args["body"] for st in focal.steps if st.tool == "email_send.send")
+        assert "<<" not in body and len(body) > 100
+        assert flow_violations(c)
 
 
 def test_benign_fillers_in_attack_composites_carry_no_marks() -> None:

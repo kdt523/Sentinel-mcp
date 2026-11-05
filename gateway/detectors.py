@@ -90,21 +90,63 @@ _TOKEN_SPLIT = re.compile(r"[\s&=?/\\,;:\"'<>()\[\]{}|`]+")
 _B64_RE = re.compile(r"[A-Za-z0-9+/_-]{16,}={0,2}")
 
 
-def _variants(text: str) -> list[str]:
-    out = [text]
+_HEX_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}){8,}\b")
+DECODE_MAX_INPUT = 256 * 1024  # longer strings are fingerprinted as-is, never decoded
+DECODE_MAX_SEGMENTS = 64  # encoded segments decoded per layer
+DECODE_MAX_TOTAL = 512 * 1024  # total decoded characters per input string
+DECODE_LAYERS = 2  # a single layer plus one nested layer
+
+
+def _readable(decoded: str) -> bool:
+    return bool(decoded) and all(c.isprintable() or c in "\n\r\t" for c in decoded)
+
+
+def _decode_segments(text: str) -> list[str]:
+    """One decoding layer: URL-unquoting of the whole string, then every base64 or hex
+    segment that decodes to readable UTF-8 text."""
+    out: list[str] = []
     unq = unquote_plus(text)
     if unq != text:
         out.append(unq)
-    for blob in _B64_RE.findall(unq):  # one level of base64 smuggling
-        padded = blob + "=" * (-len(blob) % 4)
-        for dec in (b64decode, urlsafe_b64decode):
+    segments = [("b64", m) for m in _B64_RE.findall(unq)] + [
+        ("hex", m) for m in _HEX_RE.findall(unq)
+    ]
+    for kind, blob in segments[:DECODE_MAX_SEGMENTS]:
+        decoders = (
+            (bytes.fromhex,) if kind == "hex"
+            else (b64decode, urlsafe_b64decode)
+        )  # fmt: skip
+        payload = blob if kind == "hex" else blob + "=" * (-len(blob) % 4)
+        for dec in decoders:
             try:
-                decoded = dec(padded).decode("utf-8")
+                decoded = dec(payload).decode("utf-8")
             except ValueError:  # includes binascii.Error and UnicodeDecodeError
                 continue
-            if decoded.isprintable() or "\n" in decoded:
+            if _readable(decoded):
                 out.append(decoded)
             break
+    return out
+
+
+def _variants(text: str) -> list[str]:
+    """``text`` plus its decodings: URL-encoding, base64 and hex segments, up to
+    ``DECODE_LAYERS`` deep (e.g. base64 inside a URL parameter, hex inside base64), with
+    bounded input size, segment count and total output."""
+    out = [text]
+    if len(text) > DECODE_MAX_INPUT:
+        return out
+    frontier, budget, seen = [text], DECODE_MAX_TOTAL, {text}
+    for _ in range(DECODE_LAYERS):
+        nxt: list[str] = []
+        for t in frontier:
+            for d in _decode_segments(t):
+                if d in seen or len(d) > budget:
+                    continue
+                seen.add(d)
+                budget -= len(d)
+                out.append(d)
+                nxt.append(d)
+        frontier = nxt
     return out
 
 

@@ -46,7 +46,8 @@ from tools_servers.content_gen import (
 
 TEMPLATES_PATH = Path(__file__).resolve().parent / "templates.yaml"
 _CONTENT_REF = re.compile(r"<<(page|note):(poison|decoy):([a-z_*]+):([a-z_*]+)>>")
-_VALUE_REF = re.compile(r"<<([a-z_]+)>>")
+_VALUE_REF = re.compile(r"<<([a-z0-9_]+)>>")
+_ANY_REF = re.compile(r"<<[^<>]*>>")  # anything left after resolution is a build error
 CONTENT_ITEMS_PER_CELL = 40  # n in <split>.<kind>.<goal>.<technique>.<n>
 SEEN_SPLIT_RATIOS = {Split.TRAIN: 0.70, Split.VAL: 0.10, Split.TEST_SEEN: 0.10}
 
@@ -296,7 +297,15 @@ def resolve_values(steps: Sequence[StepCall], values: SessionValues) -> tuple[St
             )
         return out
 
-    return tuple(replace(st, args=fill(st.args)) for st in steps)
+    for st in steps:
+        unknown = {m.group(1) for m in _VALUE_REF.finditer(str(st.args))} - set(table)
+        if unknown:
+            raise TemplateError(f"unknown value refs {sorted(unknown)} in {st.tool}")
+    resolved = tuple(replace(st, args=fill(st.args)) for st in steps)
+    for st in resolved:
+        if left := _ANY_REF.search(str(st.args)):
+            raise TemplateError(f"unresolved placeholder {left.group(0)} in {st.tool}")
+    return resolved
 
 
 def gold_actions(steps: Sequence[StepCall]) -> list[Action | None]:
