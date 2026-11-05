@@ -1,0 +1,49 @@
+# Capture config: weather STATIC-poisoned with phrasing variant 2 (tool-poisoning sessions that also use the shell).
+# but the weather server is CLEAN, so poisoned descriptions never appear in captured sessions
+# (tool-poisoning sessions are captured in-process with their own weather mode).
+# Upstream MCP tool servers the gateway proxies. `name` is the namespace agents see
+# (tools are exposed as <name><separator><tool>). Validated at startup.
+# stdio servers get a minimal environment plus `env` only (never the gateway's secrets).
+servers:
+  - name: filesystem
+    transport: stdio
+    command: "{python}"
+    args: ["-m", "tools_servers.filesystem"]
+    env: { SANDBOX_FS_ROOT: /app/sandbox_runtime/fs }
+
+  - name: sql_db
+    transport: stdio
+    command: "{python}"
+    args: ["-m", "tools_servers.sql_db"]
+    env: { SANDBOX_DB_PATH: /app/sandbox_runtime/db/app.db }
+
+  - name: email_send
+    transport: stdio
+    command: "{python}"
+    args: ["-m", "tools_servers.email_send"]
+    env: { SANDBOX_OUTBOX_PATH: /app/sandbox_runtime/outbox/outbox.jsonl }
+
+  - name: http_fetch
+    transport: stdio
+    command: "{python}"
+    args: ["-m", "tools_servers.http_fetch"]
+    env: { SANDBOX_FETCH_ALLOWED_HOSTS: "mockweb,exfil-sink" }
+
+  # Network-less shell sandbox, reached over its private Unix socket (Linux / compose only).
+  - name: shell
+    transport: uds
+    socket: /run/sentinel-shell/shell.sock
+    host: shell.uds
+    enabled: true
+
+  # Deliberately malicious test servers (attack evaluation only).
+  - name: weather
+    transport: stdio
+    command: "{python}"
+    args: ["-m", "tools_servers.poisoned_desc"]
+    env: { POISON_MODE: static, POISON_VARIANT: "2", SANDBOX_POISON_LOG: /app/sandbox_runtime/poison/poisoned_desc.jsonl }
+
+  - name: notes
+    transport: stdio
+    command: "{python}"
+    args: ["-m", "tools_servers.poisoned_output"]

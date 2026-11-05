@@ -220,3 +220,45 @@ def test_build_id_changes_with_composition_and_mixed_ids_are_refused() -> None:
         path.write_bytes(original)
         b.composition_version.cache_clear()
     assert b.composition_version() == before
+
+
+# --- stack configs and resume ---------------------------------------------------------------------
+
+
+def test_poisoned_weather_sessions_with_shell_have_a_stack_config() -> None:
+    from data.runner import (
+        REPO,
+        STACK_DEFAULT_SERVERS,
+        _composites,
+        _uses_shell,
+        stack_servers_path,
+    )
+
+    odd = [c for c in _composites(None, 42) if _uses_shell(c) and weather_config(c)[0] != "clean"]
+    assert odd
+    for c in odd:
+        path = stack_servers_path(c)
+        assert path != STACK_DEFAULT_SERVERS and (REPO / path).is_file()
+        mode, variant = weather_config(c)
+        text = (REPO / path).read_text("utf-8")
+        assert f"POISON_MODE: {mode}" in text and f'POISON_VARIANT: "{variant}"' in text
+
+
+async def test_resume_skips_only_sessions_of_the_same_build(tmp_path: Path) -> None:
+    import json
+
+    from data.runner import BUILD_ID, run_all
+
+    cs = [c for c in BENIGN_C if _local(c)][:2]
+    out = tmp_path / "s.jsonl"
+    first = await run_all(cs, out)
+    assert first["sessions"] == 2 and first["resumed_skipped"] == 0
+    assert (await run_all(cs, out))["sessions"] == 0  # same build: nothing to redo
+    rows = [json.loads(x) for x in out.read_text("utf-8").splitlines()]
+    for r in rows:  # pretend the file came from another build
+        r["build_id"] = "old+000000000000"
+    out.write_text("\n".join(json.dumps(r) for r in rows) + "\n", "utf-8")
+    assert (await run_all(cs, out))["sessions"] == 2  # different build: redone
+    assert BUILD_ID != "old+000000000000"
+    again = await run_all(cs, out, resume_any_build=True)
+    assert again["sessions"] == 0 and again["resumed_skipped"] == 2

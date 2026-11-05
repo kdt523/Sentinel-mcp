@@ -294,6 +294,20 @@ def _compose(*args: str, stdin: str | None = None, env: dict[str, str] | None = 
     return proc.stdout
 
 
+STACK_DEFAULT_SERVERS = "config/servers.capture.yaml"
+
+
+def stack_servers_path(c: Composite) -> str:
+    """Gateway servers config for a composite: clean weather, or the static-poisoned config of
+    its phrasing variant (tool-poisoning sessions that also use the shell)."""
+    mode, variant = weather_config(c)
+    if mode == "clean":
+        return STACK_DEFAULT_SERVERS
+    if mode != "static" or variant is None:
+        raise ValueError(f"{c.session_key}: no stack config for weather mode {mode!r}")
+    return f"config/servers.capture-poison-v{variant}.yaml"
+
+
 def restart_stack_gateway(env: dict[str, str] | None = None) -> None:
     """Recreate the stack's gateway (``STACK_CAPTURE_ENV`` for capture; None = defaults)."""
     _compose("up", "-d", "--force-recreate", "--no-deps", "--wait", "--wait-timeout", "180",
@@ -324,8 +338,8 @@ async def run_on_stack(c: Composite, *, settle_s: float = 0.4,
 
     from mcp import Client
 
-    if weather_config(c)[0] != "clean":
-        raise ValueError(f"{c.session_key} needs a poisoned weather server: run in-process")
+    if weather_config(c)[0] == "rugpull":
+        raise ValueError(f"{c.session_key}: rug-pull needs a fresh server per session")
     values = SessionValues.generate(c.values_seed)
     await asyncio.to_thread(_compose, "exec", "-T", "gateway", "python", "-c",
                             _STACK_PREPARE, stdin=_session_payload(values))  # fmt: skip
@@ -493,7 +507,7 @@ def _uses_shell(c: Composite) -> bool:
 
 
 async def run_all(composites: Sequence[Composite], out: Path, *, stack: bool = False,
-                  shell_only: bool = False,
+                  shell_only: bool = False, resume_any_build: bool = False,
                   workroot: Path | None = None) -> dict[str, int]:  # fmt: skip
     """Run every composite (shell ones on the stack when ``stack``) and append its samples
     to ``out`` (JSONL). Sessions whose captured events do not line up with their steps are
@@ -521,18 +535,35 @@ async def run_all(composites: Sequence[Composite], out: Path, *, stack: bool = F
         ):
             stats["attack_sessions_fully_neutralised"] += 1
 
-    local = [] if shell_only else [c for c in composites if not _uses_shell(c)]
-    shell = [c for c in composites if _uses_shell(c)]
+    # Resume: sessions already in ``out`` are skipped (a crashed run continues where it stopped).
+    done: set[str] = set()
+    if out.exists():
+        with out.open(encoding="utf-8") as prev:
+            rows = [json.loads(line) for line in prev if line.strip()]
+        # Only sessions of THIS build count as done, unless a mixed resume is explicitly
+        # requested (step-6 checks only: data.build_dataset refuses mixed build_ids).
+        done = {r["session_id"] for r in rows
+                if resume_any_build or r.get("build_id") == BUILD_ID}  # fmt: skip
+    todo = [c for c in composites if c.session_key not in done]
+    stats["resumed_skipped"] = len(composites) - len(todo)
+    local = [] if shell_only else [c for c in todo if not _uses_shell(c)]
+    shell = [c for c in todo if _uses_shell(c)]
     with tempfile.TemporaryDirectory(dir=workroot) as tmp, out.open("a", encoding="utf-8") as fh:
         for n, c in enumerate(local):
             keep(await run_inprocess(c, Path(tmp) / f"s{n}"), fh)
         if not stack:
             stats["skipped_shell"] = len(shell)
             return stats
-        await asyncio.to_thread(restart_stack_gateway, STACK_CAPTURE_ENV)
+        # Group by weather config: clean first, then one gateway restart per poisoned variant.
+        groups: dict[str, list[Composite]] = {}
+        for c in shell:
+            groups.setdefault(stack_servers_path(c), []).append(c)
         try:
-            for c in shell:
-                keep(await run_on_stack(c), fh)
+            for path in sorted(groups, key=lambda p: (p != STACK_DEFAULT_SERVERS, p)):
+                env = {**STACK_CAPTURE_ENV, "GATEWAY_SERVERS_PATH": path}
+                await asyncio.to_thread(restart_stack_gateway, env)
+                for c in groups[path]:
+                    keep(await run_on_stack(c), fh)
         finally:
             await asyncio.to_thread(restart_stack_gateway, None)  # back to enforcing
     return stats
@@ -573,6 +604,11 @@ def main() -> None:
     ap.add_argument(
         "--stack", action="store_true", help="also run shell sessions on the compose stack (docker)"
     )
+    ap.add_argument(
+        "--resume-any-build",
+        action="store_true",
+        help="skip sessions already in --out whatever their build_id (step-6 checks)",
+    )
     ap.add_argument("--shell-only", action="store_true", help="only the shell sessions (stack)")
     args = ap.parse_args()
     stats = asyncio.run(
@@ -581,6 +617,7 @@ def main() -> None:
             args.out,
             stack=args.stack or args.shell_only,
             shell_only=args.shell_only,
+            resume_any_build=args.resume_any_build,
         )
     )
     print(json.dumps(stats, indent=2))
