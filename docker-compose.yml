@@ -1,7 +1,44 @@
-# SentinelMCP local stack. Phase 0: storage services only.
-# Gateway, tool servers, guard, monitoring and dashboard are added in later phases.
+# SentinelMCP local stack:  make dev   (docker compose up -d --build --wait)
+#
+#   agent ──HTTP──> gateway :8000 ──stdio──> filesystem / sql_db / email_send / http_fetch /
+#                     │                       weather (poisoned) / notes (poisoned)
+#                     ├──Unix socket──> sandbox-shell (network_mode: none)
+#                     ├──sandbox net (internal)──> mockweb, exfil-sink
+#                     └──backend net──> redis, postgres
+#
+# Credentials and keys come from .env (fake values only; see .env.example).
 
 name: sentinel-mcp
+
+# Hardening for every shell sandbox container: one definition, used by both services below.
+x-shell-hardening: &shell-hardening
+  image: sentinel-mcp/shell:dev
+  network_mode: none
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=16m
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  cpus: 0.5
+  mem_limit: 256m
+  memswap_limit: 256m
+  pids_limit: 64
+  ulimits:
+    nofile: { soft: 256, hard: 256 }
+    fsize: 10485760  # max 10 MiB per written file
+  healthcheck:
+    test: ["CMD", "python", "-c", "import os,stat,sys; sys.exit(0 if stat.S_ISSOCK(os.stat('/run/sentinel-shell/shell.sock').st_mode) else 1)"]
+    interval: 2s
+    timeout: 3s
+    retries: 15
+
+x-gateway-image: &gateway-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: sentinel-mcp/gateway:dev
 
 services:
   redis:
@@ -11,6 +48,7 @@ services:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
+    networks: [backend]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -30,6 +68,7 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    networks: [backend]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -38,33 +77,98 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # Shell tool server. Single source of truth for its hardening. Default transport: MCP
-  # streamable HTTP on a 0600 Unix socket in the dedicated `shell-sock` volume (the container
-  # has no network). Tests may also start it over stdio:
+  # One-shot: apply database migrations before the gateway starts.
+  migrate:
+    <<: *gateway-image
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      SENTINEL_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:-sentinel}@postgres:5432/${POSTGRES_DB:-sentinel}
+    networks: [backend]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+    healthcheck:
+      disable: true
+
+  gateway:
+    <<: *gateway-image
+    environment:
+      SENTINEL_REDIS_URL: redis://redis:6379/0
+      SENTINEL_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sentinel}:${POSTGRES_PASSWORD:-sentinel}@postgres:5432/${POSTGRES_DB:-sentinel}
+      SENTINEL_ADMIN_API_KEY: ${SENTINEL_ADMIN_API_KEY:-}
+      # Enforcing by default in the dev stack. (Not SENTINEL_SHADOW_MODE: .env sets that for
+      # host runs and compose reads .env for interpolation.)
+      SENTINEL_SHADOW_MODE: ${GATEWAY_SHADOW_MODE:-false}
+      SENTINEL_MCP_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "gateway:*"]'
+      SENTINEL_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
+    volumes:
+      - sandbox-fs:/app/sandbox_runtime/fs
+      - gateway-shell-sock:/run/sentinel-shell
+    networks: [backend, sandbox]
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+      sandbox-shell: { condition: service_healthy }
+      mockweb: { condition: service_healthy }
+      exfil-sink: { condition: service_healthy }
+    stop_grace_period: 30s  # drain in-flight calls and flush the decision log
+    restart: unless-stopped
+
+  # Shell tool for the gateway: no network; reachable only via its 0600 socket.
+  sandbox-shell:
+    <<: *shell-hardening
+    build:
+      context: .
+      dockerfile: tools_servers/shell/Dockerfile
+    environment:
+      SANDBOX_SHELL_ALLOWLIST: ${SANDBOX_SHELL_ALLOWLIST:-ls,cat,grep,wc,head,echo,date,python3}
+      SHELL_TRANSPORT: uds
+      SHELL_SOCKET_PATH: /run/sentinel-shell/shell.sock
+    volumes:
+      - sandbox-fs:/sandbox  # same workspace the filesystem tool sees
+      - gateway-shell-sock:/run/sentinel-shell
+    restart: unless-stopped
+
+  # Mock website with benign and poisoned pages (indirect-injection test bed).
+  mockweb:
+    <<: *gateway-image
+    command: ["uvicorn", "tools_servers.mockweb.app:app", "--host", "0.0.0.0", "--port", "80"]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0  # non-root binds :80 (pages use http://mockweb/)
+    networks: [sandbox]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1/healthz', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Fake attacker server: records whatever reaches it (used to measure attack success).
+  exfil-sink:
+    <<: *gateway-image
+    command: ["uvicorn", "tools_servers.exfil_sink.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks: [sandbox]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/_sink/healthz', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ---- test-only services ------------------------------------------------------------
+
+  # Isolated shell for tests/integration/test_shell_*.py (own socket volume, bind sandbox).
   #   docker compose run --rm -T -e SHELL_TRANSPORT=stdio shell
-  # Profile keeps it out of `make dev` until the gateway is wired in.
   shell:
+    <<: *shell-hardening
     profiles: ["sandbox"]
     build:
       context: .
       dockerfile: tools_servers/shell/Dockerfile
-    image: sentinel-mcp/shell:dev
     stdin_open: true
-    network_mode: none
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m
-    user: "10001:10001"
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    cpus: 0.5
-    mem_limit: 256m
-    memswap_limit: 256m
-    pids_limit: 64
-    ulimits:
-      nofile: { soft: 256, hard: 256 }
-      fsize: 10485760  # max 10 MiB per written file
     environment:
       SANDBOX_SHELL_ALLOWLIST: ${SANDBOX_SHELL_ALLOWLIST:-ls,cat,grep,wc,head,echo,date,python3}
       SHELL_TRANSPORT: ${SHELL_TRANSPORT:-uds}
@@ -72,14 +176,8 @@ services:
     volumes:
       - ${SHELL_SANDBOX_DIR:-./sandbox_runtime/fs}:/sandbox
       - shell-sock:/run/sentinel-shell
-    healthcheck:
-      test: ["CMD", "python", "-c", "import os,stat,sys; sys.exit(0 if stat.S_ISSOCK(os.stat('/run/sentinel-shell/shell.sock').st_mode) else 1)"]
-      interval: 2s
-      timeout: 3s
-      retries: 15
 
-  # Test-only client container: same image and uid, no network, mounts ONLY the socket volume.
-  # Runs a Python script from stdin (used to verify gateway/transports.py end to end).
+  # Client container: same image and uid, no network, mounts ONLY the test socket volume.
   shell-probe:
     profiles: ["test"]
     image: sentinel-mcp/shell:dev
@@ -96,7 +194,14 @@ services:
     volumes:
       - shell-sock:/run/sentinel-shell
 
+networks:
+  backend: {}
+  sandbox:
+    internal: true  # mockweb / exfil-sink: reachable by the gateway, no route to the internet
+
 volumes:
   redis-data:
   postgres-data:
-  shell-sock:  # holds ONLY the shell server's Unix socket
+  sandbox-fs:          # shared workspace: filesystem tool (in gateway) + sandbox-shell
+  gateway-shell-sock:  # holds ONLY sandbox-shell's Unix socket
+  shell-sock:          # holds ONLY the test shell's Unix socket

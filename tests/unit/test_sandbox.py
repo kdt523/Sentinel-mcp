@@ -68,3 +68,19 @@ def test_symlink_escape_rejected(sandbox: Sandbox, tmp_path: Path) -> None:
 def test_missing_root_rejected(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         Sandbox(tmp_path / "nope")
+
+
+def test_prepare_seeds_an_existing_empty_dir_like_a_fresh_volume(tmp_path: Path) -> None:
+    mount = tmp_path / "volume"
+    mount.mkdir()  # Docker creates the (empty) mount point before the server starts
+    root = prepare_sandbox(mount)
+    assert (root / "docs" / "readme.md").is_file() and (root / ".env").is_file()
+
+
+def test_reset_keeps_the_mount_point_directory(tmp_path: Path) -> None:
+    root = prepare_sandbox(tmp_path / "fs")
+    (root / "extra.txt").write_text("x", encoding="utf-8")
+    inode_before = root.stat().st_ino
+    prepare_sandbox(root, reset=True)
+    assert root.stat().st_ino == inode_before and not (root / "extra.txt").exists()
+    assert (root / "docs" / "readme.md").is_file()

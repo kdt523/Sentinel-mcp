@@ -43,11 +43,17 @@ class Sandbox:
 
 
 def prepare_sandbox(runtime_root: Path, seed_dir: Path = SEED_DIR, *, reset: bool = False) -> Path:
-    """Create ``runtime_root`` from ``seed_dir``. With ``reset`` wipe it first."""
+    """Seed ``runtime_root`` from ``seed_dir`` if it is missing or EMPTY (a freshly created
+    Docker volume is an existing empty directory). With ``reset``, wipe its contents first
+    (the directory itself is kept: it may be a mount point)."""
     runtime_root = runtime_root.resolve()
     if reset and runtime_root.exists():
-        shutil.rmtree(runtime_root)
-    if not runtime_root.exists():
-        runtime_root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(seed_dir, runtime_root)
+        for child in runtime_root.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    if not runtime_root.exists() or not any(runtime_root.iterdir()):
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(seed_dir, runtime_root, dirs_exist_ok=True)
     return runtime_root

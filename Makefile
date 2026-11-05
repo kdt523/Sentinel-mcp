@@ -18,7 +18,7 @@ install: ## Install project + dev extras into .venv
 	$(UV) sync --extra dev
 
 dev: ## Start local stack (docker compose)
-	docker compose up -d --wait
+	docker compose up -d --build --wait --wait-timeout 180
 
 down: ## Stop local stack
 	docker compose down

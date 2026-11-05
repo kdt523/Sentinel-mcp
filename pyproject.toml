@@ -119,4 +119,5 @@ markers = [
     "integration: needs docker compose services (redis, postgres, tool servers)",
     "attack: attack regression suite",
     "gpu: requires a CUDA GPU",
+    "llm: needs a live LLM endpoint (AGENT_* settings; default local Ollama qwen2.5:3b)",
 ]
