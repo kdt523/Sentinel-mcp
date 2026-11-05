@@ -14,6 +14,8 @@ import yaml
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
+from tools_servers.content_gen import ContentIdError, generate_page
+
 HERE = Path(__file__).resolve().parent
 MANIFEST = HERE / "manifest.yaml"
 PAGES_DIR = HERE / "pages"
@@ -60,6 +62,14 @@ def create_app() -> FastAPI:
     async def index() -> str:
         links = "\n".join(f'<li><a href="/{slug}">{slug}</a></li>' for slug in sorted(pages))
         return f"<!doctype html><html><body><h1>Site index</h1><ul>\n{links}\n</ul></body></html>"
+
+    @app.get("/g/{item_id}", response_class=HTMLResponse)
+    async def generated(item_id: str) -> str:
+        """Generated poisoned / decoy pages (tools_servers/content_gen.py)."""
+        try:
+            return generate_page(item_id).text
+        except ContentIdError as exc:
+            raise HTTPException(status_code=404, detail="page not found") from exc
 
     @app.get("/{slug:path}", response_class=HTMLResponse)
     async def page(slug: str) -> str:

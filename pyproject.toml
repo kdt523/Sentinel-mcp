@@ -97,6 +97,10 @@ extend-exclude = ["notebooks"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Prose pools (cover texts, injection phrasings): wrapping sentences hurts review.
+"tools_servers/content_gen.py" = ["E501"]
+
 # ---------------------------------------------------------------- mypy
 [tool.mypy]
 python_version = "3.11"

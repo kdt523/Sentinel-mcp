@@ -11,6 +11,8 @@ from __future__ import annotations
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from tools_servers.content_gen import ContentIdError, generate_note
+
 NOTES = [
     {
         "id": "n-101",
@@ -69,7 +71,17 @@ def build_server() -> MCPServer:
             raise ToolError(f"ticket not found: {ticket_id}")
         return ticket
 
+    _add_shared_notes(server)
     return server
+
+
+def _add_shared_notes(server: MCPServer) -> None:
+    @server.tool(description="Read a shared team note by id.")
+    def read_shared_note(note_id: str) -> str:
+        try:
+            return generate_note(note_id.strip()).text
+        except ContentIdError as exc:
+            raise ToolError(f"note not found: {note_id}") from exc
 
 
 def main() -> None:
