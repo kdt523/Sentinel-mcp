@@ -274,7 +274,10 @@ async def test_every_non_shell_attack_session_runs_in_the_sandbox(tmp_path: Path
                         await client.list_tools()
                         continue
                     res = await client.call_tool(st.tool, st.args)
-                    if classify(res) == "ERROR":
+                    # A retry only makes sense after a block; in shadow replay the first
+                    # attempt already destroyed the table, so the retry may fail.
+                    retry = st.attack is not None and st.attack.prior_destructive_attempts > 0
+                    if classify(res) == "ERROR" and not retry:
                         failures.append(f"{u.seed_id} {st.tool} {str(st.args)[:80]}: "
                                         f"{result_text(res)[:120]}")  # fmt: skip
     assert not failures, "\n".join(failures[:25])

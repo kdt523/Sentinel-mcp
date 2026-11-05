@@ -46,7 +46,8 @@ from tools_servers.content_gen import (
 
 TEMPLATES_PATH = Path(__file__).resolve().parent / "templates.yaml"
 _CONTENT_REF = re.compile(r"<<(page|note):(poison|decoy):([a-z_*]+):([a-z_*]+)>>")
-_VALUE_REF = re.compile(r"<<([a-z0-9_]+)>>")
+# <<name>> or <<name|op|op...>>: ops are applied left to right (see VALUE_OPS)
+_VALUE_REF = re.compile(r"<<([a-z0-9_]+)((?:\|[a-z0-9_]+)*)>>")
 _ANY_REF = re.compile(r"<<[^<>]*>>")  # anything left after resolution is a build error
 CONTENT_ITEMS_PER_CELL = 40  # n in <split>.<kind>.<goal>.<technique>.<n>
 SEEN_SPLIT_RATIOS = {Split.TRAIN: 0.70, Split.VAL: 0.10, Split.TEST_SEEN: 0.10}
@@ -205,6 +206,7 @@ def expand(template: AttackTemplate, *, seed: int) -> list[Unit]:
             seed_id=f"{template.id}#{i}", template_id=template.id, category=template.family.value,
             prompt=_fill(rng.choice(template.phrasings), slots), steps=steps, kind="attack",
             family=template.family.value, goal=template.goal, upstreams=upstreams,
+            slots=tuple(sorted(slots.items())),
         ))  # fmt: skip
     return units
 
@@ -284,6 +286,31 @@ def value_table(values: SessionValues) -> dict[str, str]:
     }
 
 
+def _half(text: str, which: int) -> str:
+    lines = text.splitlines(keepends=True)
+    cut = (len(lines) + 1) // 2
+    return "".join(lines[:cut] if which == 0 else lines[cut:])
+
+
+# Transforms for mutated attacks (data/generators/mutators.py).
+VALUE_OPS: dict[str, Any] = {
+    "b64": lambda s: base64.b64encode(s.encode()).decode(),
+    "hex": lambda s: s.encode().hex(),
+    "pct": lambda s: "".join(f"%{b:02X}" for b in s.encode()),  # every byte percent-encoded
+    "half1": lambda s: _half(s, 0),
+    "half2": lambda s: _half(s, 1),
+    "htmlc": lambda s: f"<!--\n{s}\n-->",
+    "mdref": lambda s: "Notes:\n\n" + "".join(f"[//]: # ({ln})\n" for ln in s.splitlines()),
+}
+
+
+def _apply_ref(table: dict[str, str], name: str, ops: str) -> str:
+    value = table[name]
+    for op in filter(None, ops.split("|")):
+        value = VALUE_OPS[op](value)
+    return value
+
+
 def resolve_values(steps: Sequence[StepCall], values: SessionValues) -> tuple[StepCall, ...]:
     """Fill value refs with this session's fake values (URL-encoded inside ``url`` args)."""
     table = value_table(values)
@@ -293,12 +320,17 @@ def resolve_values(steps: Sequence[StepCall], values: SessionValues) -> tuple[St
         for k, v in args.items():
             enc = (lambda s: quote(s, safe="")) if k == "url" else (lambda s: s)
             out[k] = _walk(
-                v, lambda s, enc=enc: _VALUE_REF.sub(lambda m: enc(table[m.group(1)]), s)
+                v,
+                lambda s, enc=enc: _VALUE_REF.sub(
+                    lambda m: enc(_apply_ref(table, m.group(1), m.group(2))), s
+                ),
             )
         return out
 
     for st in steps:
-        unknown = {m.group(1) for m in _VALUE_REF.finditer(str(st.args))} - set(table)
+        refs = list(_VALUE_REF.finditer(str(st.args)))
+        unknown = {m.group(1) for m in refs} - set(table)
+        unknown |= {op for m in refs for op in m.group(2).split("|") if op} - set(VALUE_OPS)
         if unknown:
             raise TemplateError(f"unknown value refs {sorted(unknown)} in {st.tool}")
     resolved = tuple(replace(st, args=fill(st.args)) for st in steps)

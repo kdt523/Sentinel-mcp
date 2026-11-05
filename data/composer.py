@@ -16,16 +16,36 @@ Guardrails (decided 2026-11-05):
 
 from __future__ import annotations
 
+import contextlib
 import random
 import re
+from base64 import b64decode
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Any
+from urllib.parse import unquote
 
 from data.benign.templates import SessionSpec, StepCall
 from data.sandbox_values import SessionValues
 from data.schema import Split
 from gateway.detectors import egress_targets, fingerprints, fingerprints_in_args
+from gateway.detectors import variants as decoded_variants
+
+_QUOTED = re.compile(r"'([^']{2,})'")
+
+
+def _path_variants(text: str) -> list[str]:
+    """``text``, its detector decodings, and decodings of every quoted literal of any length
+    (an encoded path such as base64('.ssh/id_rsa') is shorter than the detector's minimum)."""
+    out = decoded_variants(text)
+    for lit in _QUOTED.findall(text):
+        out.append(unquote(lit))
+        for dec in (lambda s: b64decode(s + "=" * (-len(s) % 4)), bytes.fromhex):
+            with contextlib.suppress(ValueError):
+                out.append(dec(lit).decode("utf-8"))
+    return out
+
 
 # Units per session, shared by benign and attack composites.
 LENGTH_DIST: dict[int, float] = {1: 0.20, 2: 0.35, 3: 0.30, 4: 0.15}
@@ -50,6 +70,9 @@ class Unit:
     goal: str | None = None  # attack units: what the attack tries to achieve
     # attack units: per-session upstream overrides, e.g. {"weather": {"mode": "rugpull"}}
     upstreams: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
+    source: str = "generated"  # "generated" | "mutated:<op>" (schema Sample.source)
+    parent: str | None = None  # mutants: seed_id of the seed unit (same split)
+    slots: tuple[tuple[str, Any], ...] = ()  # template slot values (language-switch mutator)
 
     @property
     def hard_negative(self) -> bool:
@@ -204,7 +227,8 @@ _PII_SQL = re.compile(r"\bfrom\s+customers\b", re.IGNORECASE)
 
 def _sensitive_reads(step: StepCall, values: SessionValues) -> tuple[list[str], list[str]]:
     """(secret texts, pii texts) this step would bring into the session (conservative)."""
-    blob = " ".join(str(v) for v in step.args.values())
+    # Decoded variants too: an encoded path (base64 / hex / percent) still reads the file.
+    blob = " ".join(d for v in step.args.values() for d in _path_variants(str(v)))
     secrets, pii = [], []
     if step.tool in ("filesystem.read_file", "shell.run"):
         for m in _SECRET_PATH.finditer(blob):

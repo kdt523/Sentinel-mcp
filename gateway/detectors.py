@@ -150,6 +150,11 @@ def _variants(text: str) -> list[str]:
     return out
 
 
+def variants(text: str) -> list[str]:
+    """Public: ``text`` and its bounded decodings (URL / base64 / hex, two layers)."""
+    return _variants(text)
+
+
 def _qualifies(token: str) -> bool:
     if len(token) < FP_MIN_TOKEN:
         return False
