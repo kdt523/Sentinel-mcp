@@ -101,6 +101,12 @@ services:
       SENTINEL_SHADOW_MODE: ${GATEWAY_SHADOW_MODE:-false}
       SENTINEL_MCP_ALLOWED_HOSTS: '["127.0.0.1:*", "localhost:*", "gateway:*"]'
       SENTINEL_LOG_LEVEL: ${GATEWAY_LOG_LEVEL:-INFO}
+      # Dataset capture (data/runner.py --stack only): raw capture is refused by the gateway
+      # unless sandbox mode is on; servers.capture.yaml serves a clean weather tool.
+      SENTINEL_CAPTURE_MODE: ${GATEWAY_CAPTURE_MODE:-false}
+      SENTINEL_SANDBOX_MODE: ${GATEWAY_SANDBOX_MODE:-false}
+      SENTINEL_CAPTURE_DIR: /app/sandbox_runtime/capture
+      SENTINEL_SERVERS_PATH: ${GATEWAY_SERVERS_PATH:-config/servers.compose.yaml}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8000}:8000"
     volumes:

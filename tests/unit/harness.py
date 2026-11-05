@@ -9,7 +9,6 @@ from typing import Any
 
 import anyio
 import fakeredis
-import httpx
 import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -20,35 +19,17 @@ from gateway.config import Settings
 from gateway.db.models import Base
 from gateway.db.sink import create_sink
 from tools_servers.email_send.server import build_server as build_email
-from tools_servers.exfil_sink.app import create_app as create_sink_app
 from tools_servers.filesystem.server import build_server as build_fs
 from tools_servers.http_fetch.server import build_server as build_fetch
-from tools_servers.mockweb.app import create_app as create_mockweb
 from tools_servers.poisoned_desc.server import build_server as build_weather
 from tools_servers.poisoned_output.server import build_server as build_notes
 from tools_servers.sandbox import prepare_sandbox
+from tools_servers.sandbox_net import SandboxWeb
 from tools_servers.sql_db.server import build_server as build_sql
 from tools_servers.sql_db.server import prepare_database
 
 REPO = Path(__file__).resolve().parents[2]
 BASE = "http://127.0.0.1:8000"
-
-
-class SandboxWeb(httpx.AsyncBaseTransport):
-    """In-process stand-in for the internal sandbox network: mockweb + exfil-sink."""
-
-    def __init__(self) -> None:
-        self.sink = create_sink_app()
-        self.routes = {
-            "mockweb": httpx.ASGITransport(app=create_mockweb()),
-            "exfil-sink": httpx.ASGITransport(app=self.sink),
-        }
-
-    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        route = self.routes.get(request.url.host)
-        if route is None:
-            raise httpx.ConnectError("no route to host", request=request)
-        return await route.handle_async_request(request)
 
 
 @asynccontextmanager

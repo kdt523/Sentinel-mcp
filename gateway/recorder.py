@@ -163,6 +163,7 @@ class DecisionRecorder:
         *,
         enforced: bool,
         raw_output: str | None = None,
+        state_before: dict[str, Any] | None = None,
     ) -> bool:
         """Queue one decision for logging. Never blocks; returns False if dropped."""
         self.submitted += 1
@@ -173,6 +174,7 @@ class DecisionRecorder:
                 "raw_output": raw_output if raw_output is not None else event.output,
                 "decision": decision.model_dump(mode="json"),
                 "enforced": enforced,
+                "state_before": state_before,
             }
         return self._put(("decision", decision_row(event, decision, enforced=enforced), raw))
 

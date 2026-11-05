@@ -166,13 +166,22 @@ class GatewayProxy:
         request: Event | None = None,
         raw_output: str | None = None,
     ) -> None:
+        # Raw capture (sandbox only) stores the session state as it was BEFORE this event,
+        # which is the context a dataset sample needs. Read before tracker.record() below.
+        before = None
+        if self.recorder is not None and self.recorder.capturing:
+            try:
+                before = (await self.tracker.get(event.session_id)).model_dump(mode="json")
+            except Exception as exc:  # noqa: BLE001 - capture must never break the call
+                log.error("capture_state_failed", error=f"{type(exc).__name__}: {exc}"[:300])
         try:
             await self.tracker.record(event, decision, request=request)
         except Exception as exc:  # noqa: BLE001 - tracking failure must not crash the call
             log.error("session_record_failed", session_id=event.session_id,
                       error=f"{type(exc).__name__}: {exc}"[:300])  # fmt: skip
         if self.recorder is not None:
-            self.recorder.submit(event, decision, enforced=result.enforced, raw_output=raw_output)
+            self.recorder.submit(event, decision, enforced=result.enforced, raw_output=raw_output,
+                                 state_before=before)  # fmt: skip
 
     # ------------------------------------------------------------------ tools/list
 
