@@ -178,3 +178,17 @@ def test_history_outcome_may_be_unknown() -> None:
     hist = [{"direction": "request", "kind": "tool_call", "tool": "filesystem.read_file",
              "preview": "{}", "outcome": "unknown"}]  # fmt: skip
     assert Sample.model_validate(_sample(history=hist)).history[0].outcome == "unknown"
+
+
+def test_llm_agent_may_do_something_malicious_in_an_ordinary_task() -> None:
+    """An 'incident': malicious event, no session_family; only allowed for LLM generators."""
+    incident = _sample(label="malicious", gold_action="BLOCK", attack_family="destructive",
+                       source="llm_session:qwen2.5:7b", generator="llm:qwen2.5:7b")  # fmt: skip
+    assert Sample.model_validate(incident).session_family is None
+    scripted = _sample(label="malicious", gold_action="BLOCK", attack_family="destructive")
+    with pytest.raises(ValidationError, match="need attack_family"):
+        Sample.model_validate(scripted)
+    no_family = _sample(label="malicious", gold_action="BLOCK", source="llm_session:qwen2.5:7b",
+                        generator="llm:qwen2.5:7b")  # fmt: skip
+    with pytest.raises(ValidationError, match="need attack_family"):
+        Sample.model_validate(no_family)

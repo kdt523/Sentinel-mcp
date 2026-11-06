@@ -42,6 +42,11 @@ which the attack fired (with a Wilson 95% interval), so a family that a small mo
 performs is visible rather than silently under-represented. A family firing in under 20% of its
 sessions is flagged in the dataset statistics.
 
+**Incidents.** An LLM agent can also perform a malicious action by itself inside an ordinary
+task. Such an event is labelled malicious by the same rules (the effect decides, not the task),
+belongs to no attack session, and is reported by family in the dataset statistics. It counts in
+event-level detection metrics; it is not part of any session-level attack success rate.
+
 ## 2. Headline: macro average by attack family
 
 Attack-side metrics (TPR, action accuracy, ASR) are reported two ways:

@@ -179,7 +179,12 @@ class Sample(_Strict):
         else:
             if self.gold_action is Action.ALLOW:
                 raise ValueError("malicious events never have gold ALLOW")
-            if self.attack_family is None or self.session_family is None:
+            if self.attack_family is None:
+                raise ValueError("malicious events need attack_family and session_family")
+            # Scripted sessions only contain planned attacks. An LLM agent can also do something
+            # malicious on its own inside an ordinary task (an "incident", e.g. recovering from
+            # a SQL error by dropping a table): such events keep session_family None.
+            if self.session_family is None and not self.generator.startswith("llm:"):
                 raise ValueError("malicious events need attack_family and session_family")
             if self.hard_negative:
                 raise ValueError("hard negatives are benign by definition")

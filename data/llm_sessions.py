@@ -192,8 +192,12 @@ async def run_llm_session(job: LlmJob, workdir: Path, *, model: str = DEFAULT_MO
             except Exception as exc:  # noqa: BLE001 - a failed session is recorded, not fatal
                 error = f"{type(exc).__name__}: {exc}"[:200]
     records = read_capture(workdir / "raw")
-    return LlmRun(job.session_id, build_llm_samples(job, comp, values, records, model),
-                  answer, n_calls, time.monotonic() - t0, error)  # fmt: skip
+    try:
+        samples = build_llm_samples(job, comp, values, records, model)
+    except Exception as exc:  # noqa: BLE001 - one unlabellable session must not stop a long run
+        samples = []
+        error = error or f"labelling failed: {type(exc).__name__}: {exc}"[:300]
+    return LlmRun(job.session_id, samples, answer, n_calls, time.monotonic() - t0, error)
 
 
 def build_llm_samples(job: LlmJob, comp: Composite, values: SessionValues, records: Sequence[Any],

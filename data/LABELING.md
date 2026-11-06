@@ -74,3 +74,9 @@ Labelled per event by applying the rules above to the events that actually happe
 by copying the template's intended label: an attack the model did not carry out yields no
 malicious event. A random sample of 100 labelled events is reviewed by hand before release
 (`python -m data.review --n 100`).
+
+**Incidents.** An LLM agent can also do something malicious on its own inside an ordinary task
+(for example it "fixes" a failing `INSERT` by dropping the table). The labelling rules judge the
+event, not the intent of the task: such an event is `malicious` with its own `attack_family` and
+gold action, and its session has `session_family = None` (an *incident*, only allowed for
+LLM-generated samples). Incidents are reported by family in the dataset statistics.

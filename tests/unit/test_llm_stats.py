@@ -135,3 +135,13 @@ def test_an_old_format_log_is_rejected_with_a_clear_message() -> None:
            "malicious_events": 1, "seconds": 1.0, "error": None}  # fmt: skip
     with pytest.raises(ValueError, match="older version"):
         fire_stats([old])
+
+
+def test_incidents_in_ordinary_tasks_are_reported_by_family() -> None:
+    a = row(None, False, mal=1)
+    a["event_families"] = {"destructive": 1}
+    b = row(None, False, mal=2)
+    b["event_families"] = {"destructive": 1, "direct_malicious": 1}
+    st = fire_stats([a, b, row(None, False), row("destructive", True)])
+    assert st["benign_sessions_with_malicious_event"] == 2
+    assert st["incidents_in_ordinary_tasks"] == {"destructive": 2, "direct_malicious": 1}

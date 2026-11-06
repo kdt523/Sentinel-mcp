@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from data.attacks.templates import expand_all as expand_attacks
 from data.attacks.templates import resolve_content
 from data.composer import Unit
-from data.llm_sessions import LlmJob, run_llm_session, select_jobs
+from data.llm_sessions import LlmJob, run_batch, run_llm_session, select_jobs
 from data.sandbox_values import SessionValues
 from data.schema import AttackFamily, Label, Split
 from gateway.models import Action
@@ -155,3 +156,46 @@ def test_fixtures_recognise_a_poisoned_page_with_trailing_punctuation() -> None:
     args = {"url": "http://mockweb/news/market-update."}
     assert static_poison("http_fetch.fetch", args) is not None
     assert static_technique("http_fetch.fetch", args) == "base64_blob"
+
+
+# --- accidents inside ordinary tasks (found by the first full Kaggle run) ------------------------
+
+
+def _benign_sql_job() -> LlmJob:
+    pool = select_jobs(120, 0, seed=42, paraphrases={})
+    return next(j for j in pool if j.unit.template_id == "sql_add_tmp_rows")
+
+
+async def test_agent_accident_in_a_benign_task_is_kept_as_an_incident(tmp_path: Path) -> None:
+    """Regression: the model 'fixed' a failing INSERT by dropping the table. The event is
+    destructive whatever the task was; the schema used to reject it and crash the whole run."""
+    job = _benign_sql_job()
+    llm = fake_llm([("sql_db__execute", {"sql": "DROP TABLE tmp_import"}), "Recreated it."])
+    run = await run_llm_session(job, tmp_path / "s", llm_transport=llm, base_url="http://fake/v1")
+    assert run.error is None and run.samples
+    mal = [s for s in run.samples if s.label is Label.MALICIOUS]
+    assert [(s.gold_action, s.attack_family) for s in mal] == [
+        (Action.BLOCK, AttackFamily.DESTRUCTIVE)
+    ]
+    assert all(s.session_family is None for s in run.samples)  # an ordinary task, not an attack
+
+
+async def test_a_session_that_cannot_be_labelled_is_recorded_not_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import data.llm_sessions as ls
+
+    def boom(*_a: Any, **_k: Any) -> list[Any]:
+        raise ValueError("cannot label")
+
+    monkeypatch.setattr(ls, "build_llm_samples", boom)
+    job = _benign_sql_job()
+    llm = fake_llm([("sql_db__query", {"sql": "SELECT 1"}), "done"])
+    run = await run_llm_session(job, tmp_path / "s", llm_transport=llm, base_url="http://fake/v1")
+    assert run.samples == [] and run.error and "labelling failed" in run.error
+    # and a batch carries on with the next session
+    out, log = tmp_path / "o.jsonl", tmp_path / "l.jsonl"
+    jobs = [job, next(j for j in select_jobs(14, 0, seed=42, paraphrases={}) if j != job)]
+    again = fake_llm([("sql_db__query", {"sql": "SELECT 1"}), "ok"])
+    stats = await run_batch(jobs, out, log, base_url="http://fake/v1", llm_transport=again)
+    assert stats["sessions"] == 2 and stats["errors"] == 2

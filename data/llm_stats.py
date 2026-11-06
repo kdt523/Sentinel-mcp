@@ -46,6 +46,16 @@ def _cell(fired: int, n: int) -> dict[str, Any]:
             "ci95": [lo, hi], "low_n": n < LOW_N}  # fmt: skip
 
 
+def _incidents(benign: list[dict[str, Any]]) -> dict[str, int]:
+    """Malicious events the agent produced on its own inside ordinary tasks, by event family."""
+    out: dict[str, int] = defaultdict(int)
+    for r in benign:
+        if r["malicious_events"] > 0:
+            for fam, n in (r.get("event_families") or {}).items():
+                out[fam] += n
+    return dict(sorted(out.items()))
+
+
 def fire_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-family and per-split attack-fired rates from LLM session log rows."""
     attack = [r for r in rows if r["kind"] == "attack"]
@@ -83,6 +93,7 @@ def fire_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "per_family": per_family,
         "by_split": {s: _cell(sum(v), len(v)) for s, v in sorted(split.items())},
         "benign_sessions_with_malicious_event": sum(r["malicious_events"] > 0 for r in benign),
+        "incidents_in_ordinary_tasks": _incidents(benign),
         "errors": sum(bool(r.get("error")) for r in rows),
         "mean_seconds": round(sum(r["seconds"] for r in rows) / len(rows), 1) if rows else 0.0,
         "flags": flags,
