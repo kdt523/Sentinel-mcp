@@ -99,6 +99,31 @@ class Paraphrase:
     reason: str | None
 
 
+class ModelUnavailableError(RuntimeError):
+    """The model server did not answer repeatedly: nothing useful can be generated."""
+
+
+TIMEOUT = httpx.Timeout(connect=10, read=300, write=30, pool=30)
+WARMUP_TIMEOUT = httpx.Timeout(connect=10, read=900, write=30, pool=30)  # first load of a model
+SAVE_EVERY = 10
+MAX_CONSECUTIVE_ERRORS = 5
+
+
+async def _chat(client: httpx.AsyncClient, body: dict[str, Any], *, retries: int = 2,
+                timeout: httpx.Timeout = TIMEOUT) -> str:  # fmt: skip
+    """One chat completion with retries on timeouts / transient HTTP errors."""
+    last: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.post("/chat/completions", json=body, timeout=timeout)
+            resp.raise_for_status()
+            return str(resp.json()["choices"][0]["message"]["content"])
+        except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
+            last = exc
+            await asyncio.sleep(2 * (attempt + 1))
+    raise ModelUnavailableError(f"{type(last).__name__}: {last}"[:200])
+
+
 async def paraphrase_one(client: httpx.AsyncClient, model: str, unit: Unit, prompt: str,
                          *, tries: int = 3) -> Paraphrase:  # fmt: skip
     keep = must_keep(prompt, unit)
@@ -109,9 +134,7 @@ async def paraphrase_one(client: httpx.AsyncClient, model: str, unit: Unit, prom
             "messages": [{"role": "system", "content": _SYSTEM},
                          {"role": "user", "content": prompt}],
         }  # fmt: skip
-        resp = await client.post("/chat/completions", json=body)
-        resp.raise_for_status()
-        candidate = str(resp.json()["choices"][0]["message"]["content"])
+        candidate = await _chat(client, body)
         reason = validate(prompt, candidate, keep)
         if reason is None:
             text = candidate.strip().strip("`").strip()
@@ -119,6 +142,15 @@ async def paraphrase_one(client: httpx.AsyncClient, model: str, unit: Unit, prom
                 text = text[1:-1].strip()
             return Paraphrase(unit.seed_id, prompt, text, None)
     return Paraphrase(unit.seed_id, prompt, None, reason)
+
+
+def _save(path: Path, data: dict[str, Any], model: str) -> None:
+    data["model"] = model
+    data["generated"] = datetime.now(UTC).strftime("%Y-%m-%d")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False, sort_keys=True) + "\n", "utf-8")
+    tmp.replace(path)  # atomic: a crash never leaves a half-written file
 
 
 async def generate(
@@ -129,24 +161,41 @@ async def generate(
     path: Path = PARAPHRASES_PATH,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
-    """Paraphrase (unit, prompt) pairs and merge the results into the cache file."""
+    """Paraphrase (unit, prompt) pairs and merge the results into the cache file.
+
+    Progress is saved every ``SAVE_EVERY`` prompts and on any failure, so a crash or a
+    disconnect loses little. A model that cannot be reached at all raises
+    ``ModelUnavailableError`` instead of silently rejecting every prompt."""
     data: dict[str, Any] = {"prompts": {}, "rejected": {}}
     if path.exists():
         data = json.loads(path.read_text("utf-8"))
-    async with httpx.AsyncClient(base_url=base_url, timeout=120, transport=transport) as client:
-        for unit, prompt in units:
-            if unit.seed_id in data["prompts"]:
-                continue
-            p = await paraphrase_one(client, model, unit, prompt)
-            if p.text is not None:
-                data["prompts"][unit.seed_id] = p.text
-                data["rejected"].pop(unit.seed_id, None)
-            else:
-                data["rejected"][unit.seed_id] = p.reason
-    data["model"] = model
-    data["generated"] = datetime.now(UTC).strftime("%Y-%m-%d")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=1, ensure_ascii=False, sort_keys=True) + "\n", "utf-8")
+    todo = [(u, p) for u, p in units if u.seed_id not in data["prompts"]]
+    errors = 0
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=TIMEOUT, transport=transport) as c:
+            if todo:  # absorbs the one-off model load, which can take minutes on a cold server
+                warm = {"model": model, "max_tokens": 1, "temperature": 0,
+                        "messages": [{"role": "user", "content": "hi"}]}  # fmt: skip
+                await _chat(c, warm, retries=1, timeout=WARMUP_TIMEOUT)
+            for i, (unit, prompt) in enumerate(todo, 1):
+                try:
+                    p = await paraphrase_one(c, model, unit, prompt)
+                    errors = 0
+                except ModelUnavailableError as exc:
+                    errors += 1
+                    data["rejected"][unit.seed_id] = f"model error: {exc}"
+                    if errors >= MAX_CONSECUTIVE_ERRORS:
+                        raise
+                    continue
+                if p.text is not None:
+                    data["prompts"][unit.seed_id] = p.text
+                    data["rejected"].pop(unit.seed_id, None)
+                else:
+                    data["rejected"][unit.seed_id] = p.reason
+                if i % SAVE_EVERY == 0:
+                    _save(path, data, model)
+    finally:
+        _save(path, data, model)
     return data
 
 
