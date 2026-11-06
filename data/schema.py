@@ -149,6 +149,10 @@ class Sample(_Strict):
     # Shadow capture keeps running after a would-be TERMINATE_SESSION; such later events
     # never happen in an enforced deployment and are excluded from every split by default.
     post_termination: bool = False
+    # LLM-generated sessions only: the agent did something unrequested that is NOT malicious
+    # (e.g. added a column nobody asked for). Events stay benign; the whole session is excluded
+    # from attack and false-positive metrics and kept in a separate analysis file.
+    agent_misbehaviour: bool = False
 
     split: Split | None = None  # assigned by the builder
 
@@ -192,4 +196,6 @@ class Sample(_Strict):
             raise ValueError("a neutralised event reached the agent clean: label it benign")
         if self.attack_goal is not None and self.session_family is None:
             raise ValueError("attack_goal belongs to attack sessions")
+        if self.agent_misbehaviour and not self.generator.startswith("llm:"):
+            raise ValueError("agent_misbehaviour only applies to LLM-generated sessions")
         return self

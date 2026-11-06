@@ -15,7 +15,7 @@ import pytest
 from data.attacks.templates import expand_all as expand_attacks
 from data.attacks.templates import resolve_content
 from data.composer import Unit
-from data.llm_sessions import LlmJob, run_batch, run_llm_session, select_jobs
+from data.llm_sessions import LlmJob, read_jsonl, run_batch, run_llm_session, select_jobs
 from data.sandbox_values import SessionValues
 from data.schema import AttackFamily, Label, Split
 from gateway.models import Action
@@ -199,3 +199,56 @@ async def test_a_session_that_cannot_be_labelled_is_recorded_not_fatal(
     again = fake_llm([("sql_db__query", {"sql": "SELECT 1"}), "ok"])
     stats = await run_batch(jobs, out, log, base_url="http://fake/v1", llm_transport=again)
     assert stats["sessions"] == 2 and stats["errors"] == 2
+
+
+# --- misbehaviour flag, timeout, family top-up ---------------------------------------------------
+
+
+async def test_unrequested_schema_change_flags_the_whole_session(tmp_path: Path) -> None:
+    job = _benign_sql_job()
+    alter = "ALTER TABLE tmp_import ADD COLUMN data TEXT"
+    llm = fake_llm([("sql_db__execute", {"sql": alter}), "Added a column."])
+    run = await run_llm_session(job, tmp_path / "s", llm_transport=llm, base_url="http://fake/v1")
+    assert run.error is None and run.samples
+    assert all(s.label is Label.BENIGN for s in run.samples)  # not malicious
+    assert all(s.agent_misbehaviour for s in run.samples)  # the whole session is flagged
+    assert run.misbehaviour and "schema change" in run.misbehaviour[0]
+
+
+async def test_a_normal_task_is_not_flagged(tmp_path: Path) -> None:
+    job = _benign_sql_job()
+    insert = "INSERT INTO tmp_import VALUES (7, 'ok')"
+    llm = fake_llm([("sql_db__execute", {"sql": insert}), "Done."])
+    run = await run_llm_session(job, tmp_path / "s", llm_transport=llm, base_url="http://fake/v1")
+    assert not any(s.agent_misbehaviour for s in run.samples) and run.misbehaviour == []
+
+
+async def test_batch_log_records_the_misbehaviour(tmp_path: Path) -> None:
+    job = _benign_sql_job()
+    llm = fake_llm([("sql_db__execute", {"sql": "CREATE TABLE x (a INT)"}), "ok"])
+    out, log = tmp_path / "o.jsonl", tmp_path / "l.jsonl"
+    await run_batch([job], out, log, base_url="http://fake/v1", llm_transport=llm)
+    (row,) = read_jsonl(log)
+    assert row["agent_misbehaviour"] is True and "schema change" in row["misbehaviour"][0]
+
+
+def test_default_timeout_is_180_seconds() -> None:
+    import data.llm_sessions as ls
+
+    assert ls.SESSION_TIMEOUT_S == 180
+
+
+def test_family_selection_is_fixed_covers_templates_and_never_clashes() -> None:
+    from data.llm_sessions import select_family_jobs
+
+    jobs = select_family_jobs("multi_step_exfil", 30, seed=42)
+    again = select_family_jobs("multi_step_exfil", 30, seed=42)
+    assert [j.session_id for j in jobs] == [j.session_id for j in again]
+    assert len(jobs) == 30 and len({j.session_id for j in jobs}) == 30
+    assert {j.unit.family for j in jobs} == {"multi_step_exfil"}
+    assert all(j.session_id.startswith("llm-x:multi_step_exfil:") for j in jobs)
+    main_run = {j.session_id for j in select_jobs(270, 180, seed=42, paraphrases={})}
+    assert not main_run & {j.session_id for j in jobs}
+    assert len({j.unit.template_id for j in jobs[:10]}) >= 7  # the pilot spans the templates
+    with pytest.raises(ValueError):
+        select_family_jobs("no_such_family", 5)

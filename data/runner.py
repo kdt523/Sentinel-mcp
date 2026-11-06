@@ -438,6 +438,7 @@ class SessionMeta:
     template_id: str
     seed_id: str
     split: Any
+    agent_misbehaviour: bool = False
 
 
 @dataclass(frozen=True)
@@ -447,6 +448,7 @@ class EventLabel:
     neutralised: bool = False
     technique: str | None = None
     hard_negative: bool = False
+    misbehaviour: str | None = None  # unrequested-but-harmless agent action (reason)
 
 
 def make_sample(meta: SessionMeta, idx: int, r: Captured, label: EventLabel,
@@ -483,6 +485,7 @@ def make_sample(meta: SessionMeta, idx: int, r: Captured, label: EventLabel,
         gateway_decision=GatewayVerdict(action=d.action, tier=d.tier, rule_id=d.rule_id,
                                         risk=d.risk, policy_version=POLICY_VERSION),
         post_termination=terminated, split=meta.split,
+        agent_misbehaviour=meta.agent_misbehaviour,
     )  # fmt: skip
 
 

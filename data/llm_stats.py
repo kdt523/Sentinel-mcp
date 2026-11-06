@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -58,8 +58,12 @@ def _incidents(benign: list[dict[str, Any]]) -> dict[str, int]:
 
 def fire_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Per-family and per-split attack-fired rates from LLM session log rows."""
-    attack = [r for r in rows if r["kind"] == "attack"]
-    benign = [r for r in rows if r["kind"] != "attack"]
+    # Sessions where the agent did something unrequested but harmless are excluded from every
+    # attack and false-positive figure and reported separately.
+    flagged = [r for r in rows if r.get("agent_misbehaviour")]
+    kept = [r for r in rows if not r.get("agent_misbehaviour")]
+    attack = [r for r in kept if r["kind"] == "attack"]
+    benign = [r for r in kept if r["kind"] != "attack"]
     if any("attack_fired" not in r for r in attack):
         raise ValueError(
             "session log rows lack 'attack_fired': the log was written by an older version "
@@ -89,6 +93,11 @@ def fire_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     n_fired = sum(bool(r["attack_fired"]) for r in attack)
     return {
         "sessions": len(rows), "attack_sessions": len(attack), "benign_sessions": len(benign),
+        "agent_misbehaviour": {
+            "sessions": len(flagged),
+            "reasons": dict(Counter(m for r in flagged for m in r.get("misbehaviour", []))),
+            "note": "excluded from attack and false-positive metrics; kept in the analysis file",
+        },
         "attack_fired": _cell(n_fired, len(attack)),
         "per_family": per_family,
         "by_split": {s: _cell(sum(v), len(v)) for s, v in sorted(split.items())},

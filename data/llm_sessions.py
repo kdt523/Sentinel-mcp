@@ -21,7 +21,7 @@ import tempfile
 import time
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +53,7 @@ from gateway.models import Action
 
 PARAPHRASES_PATH = REPO / "data" / "benign" / "paraphrases.json"
 DEFAULT_MODEL = "qwen2.5:7b"
-SESSION_TIMEOUT_S = 420
+SESSION_TIMEOUT_S = 180  # p95 of successful sessions in the first full run: 18.5 s
 MAX_AGENT_STEPS = 8
 # The Phase-1 agent prompt (agents.langgraph_agent.SYSTEM_PROMPT) tells the model to distrust tool
 # results, which suppresses the very compliance this dataset must capture. LLM sessions use a
@@ -81,6 +81,7 @@ class LlmRun:
     n_calls: int
     seconds: float
     error: str | None = None
+    misbehaviour: list[str] = field(default_factory=list)  # reasons (benign sessions only)
 
 
 # ----------------------------------------------------------------------------- selection
@@ -148,6 +149,50 @@ def select_jobs(n_benign: int, n_attack: int, *, seed: int = 42,
     return jobs
 
 
+def select_family_jobs(family: str, n: int, *, seed: int = 42) -> list[LlmJob]:
+    """``n`` attack sessions of ONE family (a top-up run with a stronger model).
+
+    Templates are cycled round-robin so even the first few sessions cover every template;
+    within a template, natural-English seeds and prompt-only mutants alternate. Each unit
+    keeps its dataset split. Session ids are ``llm-x:<family>:<i>`` (never clash with the main
+    run), and the list order is fixed, so a pilot is simply ``[:10]`` and the rest ``[10:]``."""
+    rng = random.Random(f"{seed}:llm-family:{family}")
+    seeds = expand_attacks(seed=seed)
+    asplit = assign_attack_splits(seeds, seed=seed)
+    by_id = {u.seed_id: u for u in seeds}
+    mutants = mutate_all(seeds, seed=seed)
+    asplit |= inherit_splits(mutants, asplit)
+    pool = [u for u in seeds + [m for m in mutants if not changes_events(m, by_id)]
+            if u.family == family]  # fmt: skip
+    if not pool:
+        raise ValueError(f"no attack units for family {family!r}")
+    groups: dict[str, list[Unit]] = defaultdict(list)
+    for u in pool:
+        groups[f"{u.template_id}|{'mut' if u.parent else 'seed'}"].append(u)
+    templates = sorted({k.split("|")[0] for k in groups})
+    rng.shuffle(templates)
+    queues = {k: rng.sample(v, len(v)) for k, v in groups.items()}
+    flip = dict.fromkeys(templates, False)
+    chosen: list[Unit] = []
+    while len(chosen) < n and any(queues.values()):
+        for t in templates:
+            kinds = ("seed", "mut") if not flip[t] else ("mut", "seed")
+            for kind in kinds:
+                q = queues.get(f"{t}|{kind}")
+                if q:
+                    chosen.append(q.pop())
+                    flip[t] = not flip[t]
+                    break
+            if len(chosen) >= n:
+                break
+    jobs = []
+    for i, u in enumerate(chosen):
+        sp = asplit[u.seed_id]
+        key = f"llm-x:{family}:{i}"
+        jobs.append(LlmJob(key, sp, resolve_content(u, sp), u.prompt, key))
+    return jobs
+
+
 # ----------------------------------------------------------------------------- one session
 
 
@@ -159,8 +204,8 @@ def _composite_of(job: LlmJob) -> Composite:
 
 async def run_llm_session(job: LlmJob, workdir: Path, *, model: str = DEFAULT_MODEL,
                           base_url: str | None = None,
-                          system_prompt: str = PLAIN_SYSTEM_PROMPT,
-                          llm_transport: Any = None) -> LlmRun:  # fmt: skip
+                          system_prompt: str = PLAIN_SYSTEM_PROMPT, llm_transport: Any = None,
+                          timeout_s: float = SESSION_TIMEOUT_S) -> LlmRun:  # fmt: skip
     import httpx2
     from mcp import Client
     from mcp.client.streamable_http import streamable_http_client
@@ -173,13 +218,13 @@ async def run_llm_session(job: LlmJob, workdir: Path, *, model: str = DEFAULT_MO
     prepare_session_sandbox(workdir / "fs", workdir / "db" / "app.db", values)
     mode, variant = weather_config(comp)
     settings = AgentSettings(llm_model=model, max_steps=MAX_AGENT_STEPS, temperature=0.0,
-                             request_timeout_s=SESSION_TIMEOUT_S)  # fmt: skip
+                             request_timeout_s=timeout_s)  # fmt: skip
     if base_url:
         settings = settings.model_copy(update={"llm_base_url": base_url})
     t0, answer, n_calls, error = time.monotonic(), "", 0, None
     base = "http://127.0.0.1:8000"
     async with capturing_gateway(workdir, mode, variant,
-                                 deadline_s=SESSION_TIMEOUT_S + 60) as app:  # fmt: skip
+                                 deadline_s=timeout_s + 60) as app:  # fmt: skip
         hc = httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url=base)
         async with hc, Client(streamable_http_client(f"{base}/mcp", http_client=hc)) as client:
             try:
@@ -187,41 +232,47 @@ async def run_llm_session(job: LlmJob, workdir: Path, *, model: str = DEFAULT_MO
                     run = await asyncio.wait_for(
                         run_task(job.prompt, client=client, model=llm,
                                  max_steps=MAX_AGENT_STEPS, system_prompt=system_prompt),
-                        SESSION_TIMEOUT_S)  # fmt: skip
+                        timeout_s)  # fmt: skip
                 answer, n_calls = run.answer, len(run.calls)
             except Exception as exc:  # noqa: BLE001 - a failed session is recorded, not fatal
                 error = f"{type(exc).__name__}: {exc}"[:200]
     records = read_capture(workdir / "raw")
+    notes: list[str] = []
     try:
-        samples = build_llm_samples(job, comp, values, records, model)
+        samples, notes = build_llm_samples(job, comp, values, records, model)
     except Exception as exc:  # noqa: BLE001 - one unlabellable session must not stop a long run
         samples = []
         error = error or f"labelling failed: {type(exc).__name__}: {exc}"[:300]
-    return LlmRun(job.session_id, samples, answer, n_calls, time.monotonic() - t0, error)
+    return LlmRun(job.session_id, samples, answer, n_calls, time.monotonic() - t0, error, notes)
 
 
 def build_llm_samples(job: LlmJob, comp: Composite, values: SessionValues, records: Sequence[Any],
-                      model: str) -> list[Sample]:  # fmt: skip
+                      model: str) -> tuple[list[Sample], list[str]]:  # fmt: skip
+    """Samples for one session plus the reasons of any agent misbehaviour (benign tasks only)."""
     unit = job.unit
     attack = unit.kind == "attack"
     family = AttackFamily(unit.family) if attack and unit.family else None
+    expected = {st.tool for st in unit.steps if st.op == "call"} if not attack else None
+    labeller = SessionLabeller(values, family, hard_negative=unit.hard_negative,
+                               expected_tools=expected)  # fmt: skip
+    labels: list[EventLabel] = [labeller.label(r) for r in records]
+    notes = [f"{records[i].event.qualified_tool}: {lab.misbehaviour}"
+             for i, lab in enumerate(labels) if lab.misbehaviour]  # fmt: skip
     meta = SessionMeta(
         session_id=job.session_id, session_family=family,
         attack_goal=unit.goal if attack else None, source=f"llm_session:{model}",
         generator=f"llm:{model}", template_id=unit.template_id,
-        seed_id=unit.parent or unit.seed_id, split=job.split,
+        seed_id=unit.parent or unit.seed_id, split=job.split, agent_misbehaviour=bool(notes),
     )  # fmt: skip
-    labeller = SessionLabeller(values, family, hard_negative=unit.hard_negative)
     samples: list[Sample] = []
     history: list[CompactEvent] = []
     terminated = False
-    for idx, r in enumerate(records):
-        label: EventLabel = labeller.label(r)
+    for idx, (r, label) in enumerate(zip(records, labels, strict=True)):
         samples.append(make_sample(meta, idx, r, label, history, terminated=terminated))
         if label.gold is Action.TERMINATE_SESSION:
             terminated = True
         history.append(compact(r))
-    return samples
+    return samples, notes
 
 
 # ----------------------------------------------------------------------------- batch driver
@@ -282,7 +333,8 @@ def prepare_resume(out: Path, log: Path, build_id: str) -> set[str]:
 
 async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str = DEFAULT_MODEL,
                     base_url: str | None = None, system_prompt: str = PLAIN_SYSTEM_PROMPT,
-                    llm_transport: Any = None) -> dict[str, Any]:  # fmt: skip
+                    llm_transport: Any = None,
+                    timeout_s: float = SESSION_TIMEOUT_S) -> dict[str, Any]:  # fmt: skip
     """Run jobs one after another, appending samples to ``out`` and one summary line per
     session to ``log`` (flushed after every session, so a disconnect loses at most one).
     Resumable: finished sessions are skipped; a different ``build_id`` refuses to resume."""
@@ -303,6 +355,7 @@ async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str 
                 base_url=base_url,
                 system_prompt=system_prompt,
                 llm_transport=llm_transport,
+                timeout_s=timeout_s,
             )
             for s in run.samples:
                 fo.write(s.model_dump_json() + "\n")
@@ -320,6 +373,7 @@ async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str 
                 "prompt": job.prompt, "answer": run.answer[:400], "tool_calls": run.n_calls,
                 "events": len(run.samples), "malicious_events": mal,
                 "event_families": dict(fired_families), "attack_fired": fired,
+                "agent_misbehaviour": bool(run.misbehaviour), "misbehaviour": run.misbehaviour,
                 "seconds": round(run.seconds, 1), "error": run.error,
             }, ensure_ascii=False) + "\n")  # fmt: skip
             fl.flush()
@@ -347,17 +401,42 @@ def main() -> None:
     ap.add_argument("--system", choices=("plain", "hardened"), default="plain")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=SESSION_TIMEOUT_S,
+        help="seconds per session before it is cut off",
+    )
+    ap.add_argument(
+        "--family",
+        default=None,
+        help="run only this attack family (top-up run); uses --n and --offset",
+    )
+    ap.add_argument("--n", type=int, default=30, help="with --family: sessions to select")
+    ap.add_argument("--offset", type=int, default=0, help="with --family: skip the first N")
     ap.add_argument("--out", type=Path, default=REPO / "data" / "raw" / "llm_samples.jsonl")
     ap.add_argument("--log", type=Path, default=REPO / "data" / "raw" / "llm_sessions.jsonl")
     args = ap.parse_args()
-    jobs = select_jobs(args.benign, args.attack, seed=args.seed)
+    if args.family:
+        jobs = select_family_jobs(args.family, args.n, seed=args.seed)[args.offset :]
+    else:
+        jobs = select_jobs(args.benign, args.attack, seed=args.seed)
     if args.limit:
         jobs = jobs[: args.limit]
     from agents.langgraph_agent import SYSTEM_PROMPT as HARDENED
 
     prompt = PLAIN_SYSTEM_PROMPT if args.system == "plain" else HARDENED
-    stats = asyncio.run(run_batch(jobs, args.out, args.log, model=args.model,
-                                  base_url=args.base_url, system_prompt=prompt))  # fmt: skip
+    stats = asyncio.run(
+        run_batch(
+            jobs,
+            args.out,
+            args.log,
+            model=args.model,
+            base_url=args.base_url,
+            system_prompt=prompt,
+            timeout_s=args.timeout,
+        )
+    )
     print(json.dumps(stats, indent=2))
 
 
@@ -365,4 +444,12 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["LlmJob", "LlmRun", "replace", "run_batch", "run_llm_session", "select_jobs"]
+__all__ = [
+    "LlmJob",
+    "LlmRun",
+    "replace",
+    "run_batch",
+    "run_llm_session",
+    "select_family_jobs",
+    "select_jobs",
+]
