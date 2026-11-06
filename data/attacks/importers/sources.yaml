@@ -41,5 +41,12 @@ sources:
     license_file: LICENSE
     copyright: "Copyright (c) 2024 Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fischer, and Florian Tramèr"
     role: test_heldout          # never used for training or validation
-    status: planned
+    status: implemented
+    data_sha256: ff644a5245679756c0810af19fa7ae0287b61e8b21ae14a6d33ca231c47ccb56   # package data/suites (names + bytes)
+    attack: important_instructions   # v0.1.35 template, filled with each injection task's GOAL
+    eval_row: held-out source        # reported separately from every in-distribution row
+    limitations:
+      - "Sessions are the ground-truth user-task calls with outputs from AgentDojo's tools; no agent is run, so the attacker's follow-up calls are not generated. Only the injected tool OUTPUT is labelled (indirect_injection / SANITIZE)."
+      - "Tools are not the sandbox's, so verified is None: detection metrics only, never ASR."
+      - "One attack template (important_instructions) and 3 user tasks per injection task: 105 injected sessions + 105 benign twins."
     note: "The repository head (089ed468cf3e, 2026-06-02) is newer than the release; the released package is what is used."
