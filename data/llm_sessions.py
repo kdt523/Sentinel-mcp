@@ -19,7 +19,7 @@ import json
 import random
 import tempfile
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -32,6 +32,7 @@ from data.attacks.templates import (
 )
 from data.attacks.templates import expand_all as expand_attacks
 from data.benign.templates import expand_all as expand_benign
+from data.build_id import current_build_id
 from data.composer import Composite, Unit, assign_splits, resolve_unit, units_from_sessions
 from data.generators.mutators import changes_events, inherit_splits, mutate_all
 from data.llm_label import SessionLabeller
@@ -222,17 +223,71 @@ def build_llm_samples(job: LlmJob, comp: Composite, values: SessionValues, recor
 # ----------------------------------------------------------------------------- batch driver
 
 
+class ResumeError(RuntimeError):
+    """Existing output belongs to a different build: never mix captures (see data/build_id.py)."""
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Parsed lines; a line cut off by a disconnect is skipped, not fatal."""
+    rows: list[dict[str, Any]] = []
+    if path.exists():
+        for line in path.read_text("utf-8").splitlines():
+            if line.strip():
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return rows
+
+
+def _atomic_write(path: Path, rows: Sequence[dict[str, Any]]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), "utf-8")
+    tmp.replace(path)
+
+
+def prepare_resume(out: Path, log: Path, build_id: str) -> set[str]:
+    """Session ids already finished, after checking and repairing the existing output.
+
+    * every logged session and every sample must carry THIS ``build_id``; otherwise the run
+      refuses (``ResumeError``): a resumed run never mixes captures;
+    * samples are written before their log line, so a disconnect can leave samples of an
+      unlogged session: those are dropped (the session is simply run again), and a half-written
+      last line is removed."""
+    rows = read_jsonl(log)
+    if rows and {r.get("build_id") for r in rows} != {build_id}:
+        found = sorted({str(r.get("build_id")) for r in rows})
+        raise ResumeError(f"{log} was written by build {found}, this is {build_id}: "
+                          "use a new output folder or delete the old files")  # fmt: skip
+    done = {str(r["session_id"]) for r in rows}
+    samples = read_jsonl(out)
+    other = {s.get("build_id") for s in samples} - {build_id}
+    if other:
+        found = sorted(map(str, other))
+        raise ResumeError(f"{out} holds samples of build {found}, this is {build_id}: "
+                          "use a new output folder or delete the old files")  # fmt: skip
+    keep = [s for s in samples if str(s["session_id"]) in done]
+    raw_lines = sum(1 for x in (out.read_text("utf-8").splitlines() if out.exists() else []) if x)
+    if len(keep) != raw_lines:
+        _atomic_write(out, keep)
+    log_lines = sum(1 for x in (log.read_text("utf-8").splitlines() if log.exists() else []) if x)
+    if len(rows) != log_lines:
+        _atomic_write(log, rows)
+    return done
+
+
 async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str = DEFAULT_MODEL,
-                    base_url: str | None = None,
-                    system_prompt: str = PLAIN_SYSTEM_PROMPT) -> dict[str, Any]:  # fmt: skip
+                    base_url: str | None = None, system_prompt: str = PLAIN_SYSTEM_PROMPT,
+                    llm_transport: Any = None) -> dict[str, Any]:  # fmt: skip
     """Run jobs one after another, appending samples to ``out`` and one summary line per
-    session to ``log``. Resumable: sessions already in ``log`` are skipped."""
+    session to ``log`` (flushed after every session, so a disconnect loses at most one).
+    Resumable: finished sessions are skipped; a different ``build_id`` refuses to resume."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    done: set[str] = set()
-    if log.exists():
-        done = {json.loads(x)["session_id"] for x in log.read_text("utf-8").splitlines() if x}
-    stats = {"sessions": 0, "samples": 0, "errors": 0, "seconds": 0.0,
-             "malicious_events": 0, "skipped_done": len(done)}  # fmt: skip
+    build_id = current_build_id()
+    done = prepare_resume(out, log, build_id)
+    stats: dict[str, Any] = {"sessions": 0, "samples": 0, "errors": 0, "seconds": 0.0,
+             "malicious_events": 0,
+             "attack_fired": 0, "skipped_done": len(done), "build_id": build_id}  # fmt: skip
     with tempfile.TemporaryDirectory() as tmp, out.open("a", encoding="utf-8") as fo, \
             log.open("a", encoding="utf-8") as fl:  # fmt: skip
         for n, job in enumerate(j for j in jobs if j.session_id not in done):
@@ -242,36 +297,32 @@ async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str 
                 model=model,
                 base_url=base_url,
                 system_prompt=system_prompt,
+                llm_transport=llm_transport,
             )
             for s in run.samples:
                 fo.write(s.model_dump_json() + "\n")
+            fo.flush()  # samples first: an unlogged session is repaired on resume
             mal = sum(s.gold_action is not Action.ALLOW for s in run.samples)
-            fl.write(
-                json.dumps(
-                    {
-                        "session_id": run.session_id,
-                        "split": job.split.value,
-                        "kind": job.unit.kind,
-                        "family": job.unit.family,
-                        "template": job.unit.template_id,
-                        "prompt": job.prompt,
-                        "answer": run.answer[:400],
-                        "tool_calls": run.n_calls,
-                        "events": len(run.samples),
-                        "malicious_events": mal,
-                        "seconds": round(run.seconds, 1),
-                        "error": run.error,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-            fo.flush()
+            family = job.unit.family if job.unit.kind == "attack" else None
+            fired_families = Counter(
+                s.attack_family.value for s in run.samples
+                if s.attack_family is not None
+            )  # fmt: skip
+            fired = family is not None and fired_families.get(family, 0) > 0
+            fl.write(json.dumps({
+                "session_id": run.session_id, "build_id": build_id, "split": job.split.value,
+                "kind": job.unit.kind, "family": job.unit.family, "template": job.unit.template_id,
+                "prompt": job.prompt, "answer": run.answer[:400], "tool_calls": run.n_calls,
+                "events": len(run.samples), "malicious_events": mal,
+                "event_families": dict(fired_families), "attack_fired": fired,
+                "seconds": round(run.seconds, 1), "error": run.error,
+            }, ensure_ascii=False) + "\n")  # fmt: skip
             fl.flush()
             stats["sessions"] += 1
             stats["samples"] += len(run.samples)
             stats["errors"] += bool(run.error)
             stats["malicious_events"] += mal
+            stats["attack_fired"] += fired
             stats["seconds"] += run.seconds
     return stats
 
