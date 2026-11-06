@@ -19,6 +19,7 @@ htmlcov/
 
 # Data / models / experiments
 data/raw/
+data/processed/
 data/cache/
 models/
 checkpoints/
