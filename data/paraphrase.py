@@ -207,6 +207,7 @@ async def generate(
                     data["rejected"][unit.seed_id] = p.reason
                 if i % SAVE_EVERY == 0:
                     _save(path, data, model)
+                    print(f"PROGRESS paraphrase {i}/{len(todo)}", flush=True)
     finally:
         _save(path, data, model)
     return data

@@ -290,7 +290,8 @@ async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str 
              "attack_fired": 0, "skipped_done": len(done), "build_id": build_id}  # fmt: skip
     with tempfile.TemporaryDirectory() as tmp, out.open("a", encoding="utf-8") as fo, \
             log.open("a", encoding="utf-8") as fl:  # fmt: skip
-        for n, job in enumerate(j for j in jobs if j.session_id not in done):
+        todo = [j for j in jobs if j.session_id not in done]
+        for n, job in enumerate(todo):
             run = await run_llm_session(
                 job,
                 Path(tmp) / f"s{n}",
@@ -324,6 +325,12 @@ async def run_batch(jobs: Sequence[LlmJob], out: Path, log: Path, *, model: str 
             stats["malicious_events"] += mal
             stats["attack_fired"] += fired
             stats["seconds"] += run.seconds
+            fam = job.unit.family or "-"
+            print(
+                f"PROGRESS {n + 1}/{len(todo)} {job.session_id} {job.unit.kind} {fam} "
+                f"fired={fired} {run.seconds:.1f}s{' ERROR' if run.error else ''}",
+                flush=True,
+            )
     return stats
 
 
