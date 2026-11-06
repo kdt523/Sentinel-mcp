@@ -187,10 +187,16 @@ def expand(template: Template, *, seed: int) -> list[SessionSpec]:
 
 def expand_all(seed: int = 42, path: Path = TEMPLATES_PATH) -> list[SessionSpec]:
     from data.destructive_check import undertagged
+    from data.fixtures import static_poison
 
     sessions = [s for t in load_templates(path) for s in expand(t, seed=seed)]
     problems = [f"{s.seed_id}: {msg}" for s in sessions for st in s.steps
                 if (msg := undertagged(st)) is not None]  # fmt: skip
+    # A benign step must never read a poisoned fixture (the output would carry an injection).
+    for s in sessions:
+        for st in s.steps:
+            if (what := static_poison(st.tool, st.args)) is not None:
+                problems.append(f"{s.seed_id}: benign step reads poisoned {what}")
     if problems:  # a benign step must never look obviously destructive
         raise TemplateError("; ".join(problems[:20]))
     return sessions

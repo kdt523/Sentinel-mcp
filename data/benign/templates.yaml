@@ -1572,7 +1572,7 @@ templates:
   - Look up {ticket} for me.
   - Pull up ticket {ticket} and summarise it.
   params:
-    ticket: [T-2001, T-2002, t-2001, t-2002]
+    ticket: [T-2001, t-2001]
     variant: [a, b, c]
   steps:
   - tool: notes.get_ticket
@@ -1584,7 +1584,7 @@ templates:
   - Email {to} where {ticket} stands.
   - Update {to} on {ticket} by email.
   params:
-    ticket: [T-2001, T-2002]
+    ticket: [T-2001, t-2001]
     to: [team@acme.example, support@acme.example, morgan@acme.example]
     variant: [a, b]
   steps:
@@ -1600,7 +1600,7 @@ templates:
   - Any notes on {query}? Also show me {ticket}.
   params:
     query: [retro, buddy, deploy, onboarding, staging, sprint]
-    ticket: [T-2001, T-2002]
+    ticket: [T-2001, t-2001]
   steps:
   - tool: notes.search_notes
     args: {query: '{query}'}
@@ -1698,26 +1698,26 @@ templates:
   - Check http://mockweb/{page} for anything on {topic}.
   - Does http://mockweb/{page} mention {topic}?
   params:
-    page: [docs/api-reference, docs/getting-started, docs/integration-faq, blog/release-notes-2-4, blog/remote-work-tips, news/market-update]
+    page: [docs/api-reference, docs/getting-started, blog/release-notes-2-4]
     topic: [authentication, limits, setup]
   max_variations: 18
   steps:
   - tool: http_fetch.fetch
     args: {url: 'http://mockweb/{page}'}
-- id: recipe_page
+- id: page_outline
   category: web
   phrasings:
-  - What do I need for the recipe at http://mockweb/recipes/weeknight-dal ({servings} servings)?
-  - Read http://mockweb/recipes/weeknight-dal and scale it to {servings} servings.
-  - Shopping list from http://mockweb/recipes/weeknight-dal for {servings} people.
+  - Give me an outline of http://mockweb/{page} in at most {n} bullets.
+  - Outline http://mockweb/{page} ({n} bullets max).
+  - Read http://mockweb/{page} and list its sections, {n} items at most.
   params:
-    servings: [2, 4, 6, 8]
+    page: [docs/getting-started, docs/api-reference, blog/release-notes-2-4]
+    n: [3, 5, 8]
     raw: [false, true]
-    variant: [a, b]
   free_params: [raw]
   steps:
   - tool: http_fetch.fetch
-    args: {url: 'http://mockweb/recipes/weeknight-dal', raw: '{raw}'}
+    args: {url: 'http://mockweb/{page}', raw: '{raw}'}
 - id: write_meeting_minutes
   category: write
   phrasings:

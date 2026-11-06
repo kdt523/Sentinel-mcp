@@ -303,9 +303,10 @@ def stack_servers_path(c: Composite) -> str:
     mode, variant = weather_config(c)
     if mode == "clean":
         return STACK_DEFAULT_SERVERS
-    if mode != "static" or variant is None:
+    if mode not in ("static", "rugpull") or variant is None:
         raise ValueError(f"{c.session_key}: no stack config for weather mode {mode!r}")
-    return f"config/servers.capture-poison-v{variant}.yaml"
+    kind = "poison" if mode == "static" else "rugpull"
+    return f"config/servers.capture-{kind}-v{variant}.yaml"
 
 
 def restart_stack_gateway(env: dict[str, str] | None = None) -> None:
@@ -338,8 +339,6 @@ async def run_on_stack(c: Composite, *, settle_s: float = 0.4,
 
     from mcp import Client
 
-    if weather_config(c)[0] == "rugpull":
-        raise ValueError(f"{c.session_key}: rug-pull needs a fresh server per session")
     values = SessionValues.generate(c.values_seed)
     await asyncio.to_thread(_compose, "exec", "-T", "gateway", "python", "-c",
                             _STACK_PREPARE, stdin=_session_payload(values))  # fmt: skip
@@ -421,6 +420,72 @@ def _focal(c: Composite) -> Unit:
     return c.units[c.focal_index]
 
 
+@dataclass(frozen=True)
+class SessionMeta:
+    """Session-level fields shared by every sample of a session."""
+
+    session_id: str
+    session_family: AttackFamily | None
+    attack_goal: str | None
+    source: str
+    generator: str
+    template_id: str
+    seed_id: str
+    split: Any
+
+
+@dataclass(frozen=True)
+class EventLabel:
+    gold: Action = Action.ALLOW
+    family: AttackFamily | None = None
+    neutralised: bool = False
+    technique: str | None = None
+    hard_negative: bool = False
+
+
+def make_sample(meta: SessionMeta, idx: int, r: Captured, label: EventLabel,
+                history: list[CompactEvent], *, terminated: bool) -> Sample:  # fmt: skip
+    ev = r.event
+    malicious = label.gold is not Action.ALLOW
+    payload = EventPayload(
+        direction=ev.direction, kind=ev.kind, server=ev.server, tool=ev.tool,
+        args=ev.args if ev.direction is Direction.REQUEST else None,
+        output=None if ev.direction is Direction.REQUEST
+        else (ev.output or "")[:OUTPUT_MAX_CHARS],
+        output_sha256=ev.output_sha256, output_chars=ev.output_chars,
+        description_changed=ev.description_changed,
+    )  # fmt: skip
+    sb = r.state_before or SessionState(session_id=ev.session_id)
+    taint = [t for t, on in (("secret", sb.secret_taint), ("pii", sb.pii_taint)) if on]
+    context = SessionContext(
+        request_count=sb.request_count, files_read=list(sb.files_read), taint_classes=taint,
+        taint_sources=list(sb.taint_sources), egress_targets=list(sb.egress_targets),
+        revoked_tools=list(sb.revoked_tools),
+    )  # fmt: skip
+    d = r.decision
+    return Sample(
+        sample_id=hashlib.sha256(f"{meta.session_id}:{idx}".encode()).hexdigest()[:16],
+        session_id=meta.session_id, step_idx=idx, history=history[-HISTORY_MAX:],
+        context=context, event=payload,
+        label=Label.MALICIOUS if malicious else Label.BENIGN, gold_action=label.gold,
+        attack_family=label.family, session_family=meta.session_family,
+        attack_goal=meta.attack_goal,
+        hard_negative=label.hard_negative and not malicious,
+        source=meta.source, generator=meta.generator, template_id=meta.template_id,
+        seed_id=meta.seed_id, neutralised_by_tool=label.neutralised,
+        hiding_technique=label.technique, build_id=BUILD_ID,
+        gateway_decision=GatewayVerdict(action=d.action, tier=d.tier, rule_id=d.rule_id,
+                                        risk=d.risk, policy_version=POLICY_VERSION),
+        post_termination=terminated, split=meta.split,
+    )  # fmt: skip
+
+
+def compact(r: Captured) -> CompactEvent:
+    ev = r.event
+    return CompactEvent(direction=ev.direction, kind=ev.kind, tool=ev.qualified_tool,
+                        preview=_preview(ev)[:400], outcome=r.decision.action)  # fmt: skip
+
+
 def build_samples(result: SessionResult, *, generator: str = "scripted") -> list[Sample]:
     c, records = result.composite, result.records
     steps = _align(c, records)
@@ -429,6 +494,11 @@ def build_samples(result: SessionResult, *, generator: str = "scripted") -> list
     session_family = AttackFamily(focal.family) if attack and focal.family else None
     targets = {st.attack.target_tool: st.attack for st in c.steps
                if st.attack is not None and st.attack.event == "description"}  # fmt: skip
+    meta = SessionMeta(
+        session_id=c.session_key, session_family=session_family,
+        attack_goal=focal.goal if attack else None, source=focal.source, generator=generator,
+        template_id=focal.template_id, seed_id=focal.parent or focal.seed_id, split=c.split,
+    )  # fmt: skip
     samples: list[Sample] = []
     history: list[CompactEvent] = []
     terminated = False
@@ -453,49 +523,17 @@ def build_samples(result: SessionResult, *, generator: str = "scripted") -> list
                     gold, family = gold_for_mark(m, Direction.OUTPUT, EventKind.TOOL_CALL)
                 else:
                     neutralised = True
-        malicious = gold is not Action.ALLOW
         technique = None
         if (st is not None and ev.kind is EventKind.TOOL_CALL
                 and ev.direction is Direction.OUTPUT):  # fmt: skip
             item = _content_item(st.args)
             technique = item.technique if item is not None else None
-        payload = EventPayload(
-            direction=ev.direction, kind=ev.kind, server=ev.server, tool=ev.tool,
-            args=ev.args if ev.direction is Direction.REQUEST else None,
-            output=None if ev.direction is Direction.REQUEST
-            else (ev.output or "")[:OUTPUT_MAX_CHARS],
-            output_sha256=ev.output_sha256, output_chars=ev.output_chars,
-            description_changed=ev.description_changed,
-        )  # fmt: skip
-        sb = r.state_before or SessionState(session_id=ev.session_id)
-        taint = [t for t, on in (("secret", sb.secret_taint), ("pii", sb.pii_taint)) if on]
-        context = SessionContext(
-            request_count=sb.request_count, files_read=list(sb.files_read),
-            taint_classes=taint,
-            taint_sources=list(sb.taint_sources), egress_targets=list(sb.egress_targets),
-            revoked_tools=list(sb.revoked_tools),
-        )  # fmt: skip
-        d = r.decision
-        samples.append(Sample(
-            sample_id=hashlib.sha256(f"{c.session_key}:{idx}".encode()).hexdigest()[:16],
-            session_id=c.session_key, step_idx=idx, history=history[-HISTORY_MAX:],
-            context=context, event=payload,
-            label=Label.MALICIOUS if malicious else Label.BENIGN, gold_action=gold,
-            attack_family=family, session_family=session_family,
-            attack_goal=focal.goal if attack else None,
-            hard_negative=bool(st is not None and st.hard_negative and not malicious),
-            source=focal.source, generator=generator, template_id=focal.template_id,
-            seed_id=focal.parent or focal.seed_id, neutralised_by_tool=neutralised,
-            hiding_technique=technique, build_id=BUILD_ID,
-            gateway_decision=GatewayVerdict(action=d.action, tier=d.tier, rule_id=d.rule_id,
-                                            risk=d.risk, policy_version=POLICY_VERSION),
-            post_termination=terminated, split=c.split,
-        ))  # fmt: skip
+        label = EventLabel(gold, family, neutralised, technique,
+                           hard_negative=bool(st is not None and st.hard_negative))  # fmt: skip
+        samples.append(make_sample(meta, idx, r, label, history, terminated=terminated))
         if gold is Action.TERMINATE_SESSION:
             terminated = True  # every later event never happens in an enforced deployment
-        history.append(CompactEvent(direction=ev.direction, kind=ev.kind,
-                                    tool=ev.qualified_tool, preview=_preview(ev)[:400],
-                                    outcome=d.action))  # fmt: skip
+        history.append(compact(r))
     return samples
 
 
@@ -561,8 +599,12 @@ async def run_all(composites: Sequence[Composite], out: Path, *, stack: bool = F
         try:
             for path in sorted(groups, key=lambda p: (p != STACK_DEFAULT_SERVERS, p)):
                 env = {**STACK_CAPTURE_ENV, "GATEWAY_SERVERS_PATH": path}
-                await asyncio.to_thread(restart_stack_gateway, env)
+                fresh_each = "rugpull" in path  # a rug-pull server flips after its 2nd listing
+                if not fresh_each:
+                    await asyncio.to_thread(restart_stack_gateway, env)
                 for c in groups[path]:
+                    if fresh_each:
+                        await asyncio.to_thread(restart_stack_gateway, env)
                     keep(await run_on_stack(c), fh)
         finally:
             await asyncio.to_thread(restart_stack_gateway, None)  # back to enforcing
