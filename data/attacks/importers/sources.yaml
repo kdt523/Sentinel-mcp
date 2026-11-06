@@ -31,12 +31,15 @@ sources:
     name: AgentDojo
     paper: "AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents (Debenedetti et al., 2024)"
     repository: https://github.com/ethz-spylab/agentdojo
-    commit: 089ed468cf3ed0322acc66b0211f26d9d90dbf60
-    commit_short: 089ed468cf3e
-    commit_date: "2026-06-02"
+    commit: a75aba7631d3ca5fb7ab938965c97ead2f9ff84b   # tag v0.1.35 (the release that is used)
+    commit_short: a75aba7631d3
+    commit_date: "2025-10-27"
     release: v0.1.35
+    pypi: agentdojo==0.1.35
+    suites_version: v1.2.2
     license: MIT
     license_file: LICENSE
     copyright: "Copyright (c) 2024 Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fischer, and Florian Tramèr"
     role: test_heldout          # never used for training or validation
     status: planned
+    note: "The repository head (089ed468cf3e, 2026-06-02) is newer than the release; the released package is what is used."
