@@ -134,7 +134,7 @@ class Sample(_Strict):
     # --- provenance --------------------------------------------------------------------
     source: str = Field(pattern=r"^(generated|agentdojo|injecagent|mutated:[a-z0-9_]+"
                                 r"|llm_session:[a-z0-9_.:-]+|llm_attacker:r[0-9]+)$")  # fmt: skip
-    generator: str = Field(pattern=r"^(scripted|llm:[a-z0-9_.:-]+)$")
+    generator: str = Field(pattern=r"^(scripted|llm:[a-z0-9_.:-]+|import:[a-z0-9_.-]+)$")
     template_id: str  # template the session came from
     seed_id: str  # mutants share their seed's id -> same split
     verified: bool | None = None  # attack sessions: goal achieved with the gateway OFF

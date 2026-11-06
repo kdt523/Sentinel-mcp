@@ -1,0 +1,42 @@
+# Public benchmark sources used by the dataset (recorded in the dataset card).
+# Licences were read from the repositories' own LICENSE files on 2026-11-07, not only from
+# GitHub's detection. Data is downloaded from the PINNED commit and checked against sha256.
+# Raw files live under data/raw/external/ (git-ignored); only this registry is committed.
+
+sources:
+  injecagent:
+    name: InjecAgent
+    paper: "InjecAgent: Benchmarking Indirect Prompt Injections in Tool-Integrated Large Language Model Agents (Zhan et al., 2024)"
+    repository: https://github.com/uiuc-kang-lab/InjecAgent
+    commit: f19c9f2c79a41046eb13c03c51a24c567a8ffa07
+    commit_short: f19c9f2c79a4
+    commit_date: "2024-07-02"
+    license: MIT
+    license_file: LICENCE
+    copyright: "Copyright (c) 2023 Qiusi Zhan"
+    role: train_val_test_seen   # the cheaper adapter feeds training; AgentDojo is held out
+    families: [indirect_injection]
+    files:
+      test_cases_dh_base.json: 0a8186468d21389af432e8c7b399ae42264d1b93a07b65c7a489468508604305
+      test_cases_dh_enhanced.json: 885602716b72c18af80695ce6c2e1f242fa03163bc90b0788b0c5e4ab6216d50
+      test_cases_ds_base.json: 4daab35c62a3845e8b9400f4dca58b9c9f37e57cd33b2337552557fbb26282e9
+      test_cases_ds_enhanced.json: 7bc510868df032511053fc40e8470e68a041fb7148d055112093594bf73ab0ce
+      tools.json: e21a8f70b1d5de4677d6d52642936a322655d79b17a72c84f600550384083a1e
+      user_cases.jsonl: c840e2b00fdce68e7142d0970220522303d67b2530d6fb36ef1112448cdd8977
+    limitations:
+      - "Only 17 user tasks and about 62 distinct attacker instructions, crossed with 2 wrappers (plain / 'IMPORTANT!!! Ignore all previous instructions'): effective diversity is low. Splits are made by attacker instruction."
+      - "The attacker's follow-up tool calls have no arguments in the source, so only the injected tool OUTPUT is labelled (indirect_injection / SANITIZE); no follow-up requests are invented."
+      - "Tools are not the sandbox's tools, so these sessions cannot be replayed with the gateway off: verified is None and they are excluded from ASR, used for detection metrics only."
+  agentdojo:
+    name: AgentDojo
+    paper: "AgentDojo: A Dynamic Environment to Evaluate Prompt Injection Attacks and Defenses for LLM Agents (Debenedetti et al., 2024)"
+    repository: https://github.com/ethz-spylab/agentdojo
+    commit: 089ed468cf3ed0322acc66b0211f26d9d90dbf60
+    commit_short: 089ed468cf3e
+    commit_date: "2026-06-02"
+    release: v0.1.35
+    license: MIT
+    license_file: LICENSE
+    copyright: "Copyright (c) 2024 Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc Fischer, and Florian Tramèr"
+    role: test_heldout          # never used for training or validation
+    status: planned
