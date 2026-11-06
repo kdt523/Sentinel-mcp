@@ -203,3 +203,16 @@ def test_val_and_test_get_no_weights(tmp_path: Path) -> None:
     weights = json.loads((tmp_path / "out" / "v1" / "train_weights.json").read_text("utf-8"))
     train = bd.load_samples([tmp_path / "out" / "v1" / "train.jsonl"])
     assert set(weights) == {s.sample_id for s in train}
+
+
+def test_review_sample_is_stratified_and_deterministic(tmp_path: Path) -> None:
+    from data import review
+
+    rows = corpus()
+    picked = review.draw(rows, 12)
+    assert picked == review.draw(rows, 12) and len(picked) == 12
+    strata = {bd.stratum(s) for s in picked}
+    assert len(strata) >= 6  # spread over families, not dominated by the 40 benign samples
+    assert len(review.draw(rows, 10_000)) == len(rows)
+    text = review.render(picked[0], 1)
+    assert "Verdict" in text and picked[0].session_id in text
