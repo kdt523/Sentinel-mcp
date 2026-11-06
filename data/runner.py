@@ -156,8 +156,8 @@ async def replay_steps(client: Any, steps: Sequence[StepCall]) -> list[str]:
 
 
 @asynccontextmanager
-async def capturing_gateway(workdir: Path, weather_mode: str,
-                            weather_variant: int | None) -> AsyncGenerator[Any]:  # fmt: skip
+async def capturing_gateway(workdir: Path, weather_mode: str, weather_variant: int | None,
+                            *, deadline_s: float = 120) -> AsyncGenerator[Any]:  # fmt: skip
     """A fresh in-process gateway (shadow mode, raw capture, sandbox mode) over the
     session's sandbox. The capture is flushed when the context exits."""
     import anyio
@@ -205,7 +205,7 @@ async def capturing_gateway(workdir: Path, weather_mode: str,
     app = create_app(settings, redis=fakeredis.FakeAsyncRedis(),
                      sink=create_sink(f"sqlite:///{db}"), upstream_targets=targets)  # fmt: skip
     async with app.api.router.lifespan_context(app.api):
-        with anyio.fail_after(120):
+        with anyio.fail_after(deadline_s):
             yield app
 
 

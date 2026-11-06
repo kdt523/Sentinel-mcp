@@ -27,6 +27,10 @@ COMPOSITION_FILES = (
     "data/labeling.py",
     "data/destructive_check.py",
     "data/sandbox_values.py",
+    "data/fixtures.py",
+    "data/llm_label.py",
+    "data/llm_sessions.py",
+    "data/benign/paraphrases.json",  # optional: absent until paraphrases are generated
     "tools_servers/content_gen.py",
 )
 
@@ -39,8 +43,11 @@ class MixedBuildError(ValueError):
 def composition_version() -> str:
     h = hashlib.sha256()
     for rel in COMPOSITION_FILES:
+        path = REPO / rel
+        if not path.exists():  # optional inputs (paraphrases) may not exist yet
+            continue
         h.update(rel.encode() + b"\0")
-        h.update((REPO / rel).read_bytes().replace(b"\r\n", b"\n") + b"\0")
+        h.update(path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return h.hexdigest()[:12]
 
 
