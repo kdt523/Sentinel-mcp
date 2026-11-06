@@ -167,3 +167,30 @@ async def test_progress_is_saved_when_the_server_dies_midway(
     # a rerun resumes: finished prompts are not asked again
     again = await generate(units[:3], path=path, transport=_fake([]), base_url="http://fake/v1")
     assert set(again["prompts"]) == set(saved["prompts"])
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "Summarize docs/release-process.md for me.",  # spelling only
+        "summarise docs/release-process.md for me",  # case and punctuation only
+    ],
+)
+def test_near_copies_are_rejected(candidate: str) -> None:
+    result = validate(PROMPT, candidate, must_keep(PROMPT, UNIT))
+    assert result is not None and "identical" in result
+
+
+def test_a_real_rewording_is_still_accepted() -> None:
+    assert validate(PROMPT, "Could you give me the main points of docs/release-process.md?",
+                    must_keep(PROMPT, UNIT)) is None  # fmt: skip
+
+
+async def test_cached_entries_are_rechecked_against_current_rules(tmp_path: Path) -> None:
+    path = tmp_path / "p.json"
+    cached = {"prompts": {"doc_summary#0": "Summarize docs/release-process.md for me."}}
+    path.write_text(json.dumps({**cached, "rejected": {}}), "utf-8")
+    transport = _fake(["Tell me what docs/release-process.md covers."])
+    data = await generate([(UNIT, PROMPT)], path=path, transport=transport,
+                          base_url="http://fake/v1")  # fmt: skip
+    assert data["prompts"]["doc_summary#0"] == "Tell me what docs/release-process.md covers."

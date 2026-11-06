@@ -55,7 +55,13 @@ from data.schema import (
 from gateway.models import Action, Decision, Direction, Event, EventKind
 from gateway.policy import policy_version
 from gateway.session import SessionState, _preview
-from tools_servers.content_gen import ZW, ContentIdError, generate_note, generate_page
+from tools_servers.content_gen import (
+    ZW,
+    ContentIdError,
+    generate_note,
+    generate_page,
+    strip_url_tail,
+)
 from tools_servers.poisoned_desc.server import FORECAST_CLEAN
 
 REPO = Path(__file__).resolve().parents[1]
@@ -368,7 +374,7 @@ def _content_item(args: dict[str, Any]) -> Any:
     try:
         if "note_id" in args:
             return generate_note(str(args["note_id"]))
-        url = str(args.get("url", ""))
+        url = strip_url_tail(str(args.get("url", "")))
         if "/g/" in url:
             return generate_page(url.rsplit("/g/", 1)[1].split("?")[0])
     except ContentIdError:

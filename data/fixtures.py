@@ -13,6 +13,7 @@ from __future__ import annotations
 from functools import cache
 from typing import Any
 
+from tools_servers.content_gen import strip_url_tail
 from tools_servers.mockweb.app import load_pages
 
 POISONED_NOTES = frozenset({"n-102"})
@@ -28,7 +29,7 @@ def poisoned_pages() -> dict[str, str | None]:
 def static_poison(tool: str, args: dict[str, Any]) -> str | None:
     """Description of the static poisoned content this call reads, else None."""
     if tool == "http_fetch.fetch":
-        url = str(args.get("url", ""))
+        url = strip_url_tail(str(args.get("url", "")))
         if "mockweb/" in url:
             slug = url.split("mockweb/", 1)[1].split("?")[0].strip("/")
             if slug in poisoned_pages():
@@ -45,6 +46,11 @@ def static_poison(tool: str, args: dict[str, Any]) -> str | None:
 def static_technique(tool: str, args: dict[str, Any]) -> str | None:
     """Hiding technique of the static poisoned page this call reads (None if not a page)."""
     if tool == "http_fetch.fetch" and static_poison(tool, args):
-        slug = str(args.get("url", "")).split("mockweb/", 1)[1].split("?")[0].strip("/")
+        slug = (
+            strip_url_tail(str(args.get("url", "")))
+            .split("mockweb/", 1)[1]
+            .split("?")[0]
+            .strip("/")
+        )
         return poisoned_pages().get(slug)
     return None

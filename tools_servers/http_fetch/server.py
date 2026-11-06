@@ -20,6 +20,8 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from tools_servers.content_gen import strip_url_tail
+
 DEFAULT_ALLOWED_HOSTS = ("mockweb", "exfil-sink")
 TIMEOUT_S = 5.0
 MAX_BYTES = 1_000_000
@@ -114,7 +116,7 @@ def build_server(
         description="Fetch a URL with HTTP GET and return its text. Set raw=true for raw HTML."
     )
     async def fetch(url: str, raw: bool = False) -> str:
-        current = url.strip()
+        current = strip_url_tail(url)
         async with httpx.AsyncClient(
             transport=transport,
             timeout=TIMEOUT_S,

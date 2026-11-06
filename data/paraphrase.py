@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import re
 from dataclasses import dataclass
@@ -79,6 +80,9 @@ def validate(original: str, candidate: str, keep: list[str]) -> str | None:
         return "empty or multi-line"
     if text.lower() == original.lower():
         return "identical to the original"
+    # a change of case, spelling or one filler word adds no wording diversity
+    if difflib.SequenceMatcher(None, original.lower(), text.lower()).ratio() > NEAR_COPY_RATIO:
+        return "near-identical to the original"
     if not 0.4 * len(original) <= len(text) <= 2.5 * len(original) + 20:
         return "length out of range"
     missing = [k for k in keep if k.lower() not in text.lower()]
@@ -107,6 +111,7 @@ TIMEOUT = httpx.Timeout(connect=10, read=300, write=30, pool=30)
 WARMUP_TIMEOUT = httpx.Timeout(connect=10, read=900, write=30, pool=30)  # first load of a model
 SAVE_EVERY = 10
 MAX_CONSECUTIVE_ERRORS = 5
+NEAR_COPY_RATIO = 0.93
 
 
 async def _chat(client: httpx.AsyncClient, body: dict[str, Any], *, retries: int = 2,
@@ -169,6 +174,14 @@ async def generate(
     data: dict[str, Any] = {"prompts": {}, "rejected": {}}
     if path.exists():
         data = json.loads(path.read_text("utf-8"))
+    # cache hygiene: entries that fail the CURRENT rules are dropped and regenerated
+    for unit, prompt in units:
+        cached = data["prompts"].get(unit.seed_id)
+        if cached is not None:
+            why = validate(prompt, cached, must_keep(prompt, unit))
+            if why is not None:
+                data["prompts"].pop(unit.seed_id)
+                data["rejected"][unit.seed_id] = f"cache re-check: {why}"
     todo = [(u, p) for u, p in units if u.seed_id not in data["prompts"]]
     errors = 0
     try:

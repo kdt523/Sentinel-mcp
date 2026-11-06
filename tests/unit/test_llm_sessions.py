@@ -123,3 +123,35 @@ def test_selection_is_stratified_and_deterministic() -> None:
         j.unit.family for j in a if j.split is Split.TRAIN and j.unit.kind == "attack"
     }
     assert not train_families & {"tool_poisoning", "social_engineering_approval"}
+
+
+async def test_url_copied_with_a_sentence_final_period_still_works(tmp_path: Path) -> None:
+    """Regression from the first Colab run: the model copied 'http://.../x.30.' (the period
+    ending the user's sentence) into the fetch call, which returned 404 and hid the attack."""
+    job = _job("ii_page_exfil")
+    url = next(st.args["url"] for st in job.unit.steps if st.tool == "http_fetch.fetch")
+    llm = fake_llm([("http_fetch__fetch", {"url": url + ".", "raw": True}), "Summary."])
+    run = await run_llm_session(job, tmp_path / "s", llm_transport=llm, base_url="http://fake/v1")
+    fetches = [s for s in run.samples if s.event.tool == "fetch"]
+    fetched = next(s for s in fetches if s.event.kind.value == "tool_call"
+                   and s.event.direction.value == "output")  # fmt: skip
+    text = (fetched.event.output or "").lower()
+    assert "404" not in text and "not found" not in text
+    assert fetched.gold_action is Action.SANITIZE  # the injection reached the agent
+    assert fetched.attack_family is AttackFamily.INDIRECT_INJECTION
+
+
+def test_strip_url_tail() -> None:
+    from tools_servers.content_gen import strip_url_tail
+
+    assert strip_url_tail("http://mockweb/g/a.b.30.") == "http://mockweb/g/a.b.30"
+    assert strip_url_tail("  http://mockweb/docs/x?y=1)!  ") == "http://mockweb/docs/x?y=1"
+    assert strip_url_tail("http://mockweb/docs/x") == "http://mockweb/docs/x"
+
+
+def test_fixtures_recognise_a_poisoned_page_with_trailing_punctuation() -> None:
+    from data.fixtures import static_poison, static_technique
+
+    args = {"url": "http://mockweb/news/market-update."}
+    assert static_poison("http_fetch.fetch", args) is not None
+    assert static_technique("http_fetch.fetch", args) == "base64_blob"
