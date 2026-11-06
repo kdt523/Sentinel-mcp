@@ -55,7 +55,7 @@ def test_only_llm_samples_can_carry_the_flag() -> None:
         sample("a", 0, generator="scripted", source="generated", agent_misbehaviour=True)
 
 
-def test_dedupe_keeps_the_first_listing_and_poisoned_or_changed_ones() -> None:
+def test_dedupe_per_session_keeps_the_first_listing_and_poisoned_or_changed_ones() -> None:
     poisoned = desc("s", 5, "get_forecast", label="malicious", gold_action="SANITIZE",
                     attack_family="tool_poisoning", session_family="tool_poisoning")  # fmt: skip
     rows = [
@@ -66,23 +66,49 @@ def test_dedupe_keeps_the_first_listing_and_poisoned_or_changed_ones() -> None:
         desc("s", 6, "get_forecast", changed=True),  # changed: kept
         desc("other", 0, "get_forecast"),  # another session keeps its own first listing
     ]  # fmt: skip
-    out = dedupe_descriptions(rows)
+    out = dedupe_descriptions(rows, scope="session")
     assert [(s.session_id, s.step_idx) for s in out] == [
-        ("s", 0),
-        ("s", 1),
-        ("s", 4),
-        ("s", 5),
-        ("s", 6),
-        ("other", 0),
-    ]
+        ("s", 0), ("s", 1), ("s", 4), ("s", 5), ("s", 6), ("other", 0)
+    ]  # fmt: skip
+
+
+def test_dedupe_across_sessions_keeps_one_clean_copy_per_split_and_tool() -> None:
+    """Regression: sessions list each tool once, so per-session dedupe removed nothing."""
+    rows = []
+    for sess in range(6):
+        split = "train" if sess < 4 else "val"
+        rows += [desc(f"s{sess}", t, f"tool{t}", split=split) for t in range(3)]
+    out = dedupe_descriptions(rows)
+    assert len(out) == 3 + 3  # one copy of each of 3 tools in train, one in val
+    assert {(s.split.value, s.event.tool) for s in out if s.split} == {
+        (sp, f"tool{t}") for sp in ("train", "val") for t in range(3)
+    }
+    assert len(dedupe_descriptions(rows, scope="session")) == len(rows)  # the old, useless way
+
+
+def test_dedupe_across_sessions_never_thins_poisoned_or_changed_descriptions() -> None:
+    clean = [desc(f"s{i}", 0, "get_forecast", split="train") for i in range(5)]
+    poisoned = [desc(f"p{i}", 0, "get_forecast", split="train", label="malicious",
+                     gold_action="SANITIZE", attack_family="tool_poisoning",
+                     session_family="tool_poisoning") for i in range(3)]  # fmt: skip
+    changed = [desc(f"c{i}", 1, "get_forecast", changed=True, split="train") for i in range(2)]
+    out = dedupe_descriptions(clean + poisoned + changed)
+    assert len(out) == 1 + 3 + 2
+
+
+def test_different_description_text_is_not_a_duplicate() -> None:
+    a = desc("a", 0, "get_forecast", split="train")
+    b = desc("b", 0, "get_forecast", split="train")
+    b = b.model_copy(update={"event": b.event.model_copy(update={"output_sha256": "1" * 64})})
+    assert len(dedupe_descriptions([a, b])) == 2
 
 
 def test_dedupe_removes_the_bulk_of_tool_description_samples() -> None:
     rows = []
-    for sess in ("a", "b", "c"):
-        rows += [desc(sess, 12 * k + t, f"tool{t}") for k in range(3) for t in range(12)]
-        rows += [sample(sess, 100 + k) for k in range(4)]
-    assert description_share(rows) >= 0.9
+    for sess in range(30):
+        rows += [desc(f"s{sess}", t, f"tool{t}", split="train") for t in range(12)]
+        rows += [sample(f"s{sess}", 100 + k, split="train") for k in range(4)]
+    assert description_share(rows) > 0.7
     out = dedupe_descriptions(rows)
-    assert description_share(out) < 0.8
-    assert len(out) == 3 * (12 + 4)
+    assert len(out) == 12 + 30 * 4
+    assert description_share(out) < 0.1

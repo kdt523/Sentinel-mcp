@@ -3,9 +3,9 @@
 * ``split_misbehaviour``: sessions flagged ``agent_misbehaviour`` (the agent did something
   unrequested but harmless) are excluded from attack and false-positive metrics and written to a
   separate analysis file (``write_analysis_file``), where they stay available for study.
-* ``dedupe_descriptions``: every session lists the same tool descriptions again, which would make
-  tool-description events about three quarters of all samples. Per session we keep the FIRST
-  listing of each tool and every description event that is poisoned or changed.
+* ``dedupe_descriptions``: every session lists the same clean tool descriptions again, which
+  makes tool-description events about three quarters of all samples. We keep the FIRST
+  occurrence of each (split, tool, text) and every description event that is poisoned or changed.
 """
 
 from __future__ import annotations
@@ -47,13 +47,23 @@ def misbehaviour_summary(flagged: Iterable[Sample]) -> dict[str, object]:
             "requests_by_tool": dict(sorted(by_tool.items()))}  # fmt: skip
 
 
-def dedupe_descriptions(samples: Iterable[Sample]) -> list[Sample]:
-    """Drop repeated, unchanged, benign tool-description events within a session."""
-    seen: set[tuple[str, str]] = set()
+def dedupe_descriptions(samples: Iterable[Sample], *, scope: str = "split") -> list[Sample]:
+    """Drop repeated, unchanged, benign tool-description events.
+
+    A session lists each tool once, so the real redundancy is ACROSS sessions: the same clean
+    description appears in every one of them. ``scope="split"`` (default) keeps the first
+    occurrence of each (split, tool, description text); ``scope="session"`` keeps the first per
+    session and tool. Poisoned and changed descriptions are always kept, so the rare cases that
+    matter are never thinned. Splits are never merged: each split keeps its own copy."""
+    if scope not in ("split", "session"):
+        raise ValueError("scope must be 'split' or 'session'")
+    seen: set[tuple[str, str, str]] = set()
     out: list[Sample] = []
     for s in samples:
         if s.event.kind is EventKind.TOOL_DESCRIPTION:
-            key = (s.session_id, f"{s.event.server}.{s.event.tool}")
+            where = s.session_id if scope == "session" else (s.split.value if s.split else "")
+            text = "" if scope == "session" else (s.event.output_sha256 or s.event.output or "")
+            key = (where, f"{s.event.server}.{s.event.tool}", text)
             interesting = s.label is Label.MALICIOUS or s.event.description_changed
             if key in seen and not interesting:
                 continue
